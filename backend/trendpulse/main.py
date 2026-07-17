@@ -34,6 +34,7 @@ TrendPulse 微服务 FastAPI 应用入口。
 from __future__ import annotations
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from trendpulse.collectors.utils import setup_logger
 from trendpulse.routes import TrendStore, router
@@ -60,6 +61,15 @@ def create_app() -> FastAPI:
             "提供多源趋势采集、跨区域趋势对比、扩散路径检测与本地化适配建议。"
         ),
         version="0.1.0",
+    )
+
+    # CORS 中间件 — 允许前端跨域访问
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
 
     # 初始化内存存储并种子化 demo 数据

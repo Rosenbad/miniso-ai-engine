@@ -36,6 +36,7 @@ IdeaForge FastAPI 应用入口。
 from __future__ import annotations
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from ideaforge.routes import router
 from trendpulse.collectors.utils import setup_logger
@@ -63,6 +64,15 @@ def create_app() -> FastAPI:
             "- GET /health: 健康检查\n"
         ),
         version="1.0.0",
+    )
+
+    # CORS 中间件 — 允许前端跨域访问
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
 
     # 挂载路由 (无前缀, 直接根路径)

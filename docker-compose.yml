@@ -170,9 +170,9 @@ services:
     env_file:
       - .env
     environment:
-      - NEXT_PUBLIC_TRENDPULSE_URL=http://trendpulse:8000
-      - NEXT_PUBLIC_IDEAFORGE_URL=http://ideaforge:8000
-      - NEXT_PUBLIC_MARKETPROBE_URL=http://marketprobe:8000
+      - NEXT_PUBLIC_TRENDPULSE_URL=http://localhost:8001
+      - NEXT_PUBLIC_IDEAFORGE_URL=http://localhost:8002
+      - NEXT_PUBLIC_MARKETPROBE_URL=http://localhost:8003
     depends_on:
       trendpulse:
         condition: service_started
