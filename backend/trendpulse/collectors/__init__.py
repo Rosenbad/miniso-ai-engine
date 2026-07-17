@@ -8,6 +8,10 @@
     - DouyinCollector       : 抖音话题/商品采集 (短视频带货趋势)
     - EcommerceCollector    : 电商热销榜采集 (淘宝/拼多多, 已验证商业信号)
     - SearchIndexCollector  : 搜索指数采集 (百度/微信, 大众关注度基线)
+
+海外数据源 (Task 5):
+    - TiktokCollector      : TikTok 全球热门话题/视频采集 (全球流行先行信号)
+    - InstagramCollector   : Instagram 标签趋势/网红帖子采集 (审美与视觉风格趋势)
 """
 
 from trendpulse.collectors.base import BaseCollector, CircuitBreaker, CircuitBreakerOpenError
@@ -15,6 +19,8 @@ from trendpulse.collectors.xiaohongshu import XiaohongshuCollector
 from trendpulse.collectors.douyin import DouyinCollector
 from trendpulse.collectors.ecommerce import EcommerceCollector
 from trendpulse.collectors.search_index import SearchIndexCollector
+from trendpulse.collectors.tiktok import TiktokCollector
+from trendpulse.collectors.instagram import InstagramCollector
 
 __all__ = [
     "BaseCollector",
@@ -24,4 +30,6 @@ __all__ = [
     "DouyinCollector",
     "EcommerceCollector",
     "SearchIndexCollector",
+    "TiktokCollector",
+    "InstagramCollector",
 ]
