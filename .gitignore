@@ -76,6 +76,7 @@ yarn-error.log*
 # ------------------------------------------------------------------------------
 backend/data/*
 !backend/data/.gitkeep
+!backend/data/ip_database.json
 *.csv
 *.xlsx
 *.parquet

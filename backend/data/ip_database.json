@@ -1,0 +1,95 @@
+[
+  {
+    "name": "三丽鸥·库洛米",
+    "powerScore": 85,
+    "socialMentions": 1250000,
+    "searchHeat": 92,
+    "merchandiseSales": 85,
+    "topicGrowth": 15.5,
+    "regionHeat": {
+      "china": 92,
+      "sea": 78,
+      "us": 65,
+      "eu": 45
+    },
+    "categories": ["美妆/个护", "家居/香氛", "服饰/穿搭"],
+    "categoryMatchScores": {
+      "美妆/个护": 0.95,
+      "家居/香氛": 0.85,
+      "服饰/穿搭": 0.90
+    },
+    "availability": "available",
+    "exclusiveUntil": null,
+    "licenseExpiry": "2027-06-30"
+  },
+  {
+    "name": "迪士尼·草莓熊",
+    "powerScore": 72,
+    "socialMentions": 680000,
+    "searchHeat": 78,
+    "merchandiseSales": 70,
+    "topicGrowth": 8.2,
+    "regionHeat": {
+      "china": 75,
+      "sea": 68,
+      "us": 80,
+      "eu": 60
+    },
+    "categories": ["家居/装饰", "食品/零食", "玩具/文创"],
+    "categoryMatchScores": {
+      "家居/装饰": 0.88,
+      "食品/零食": 0.82,
+      "玩具/文创": 0.90
+    },
+    "availability": "available",
+    "exclusiveUntil": null,
+    "licenseExpiry": "2028-03-31"
+  },
+  {
+    "name": "华纳·哈利波特",
+    "powerScore": 90,
+    "socialMentions": 2100000,
+    "searchHeat": 95,
+    "merchandiseSales": 92,
+    "topicGrowth": 12.0,
+    "regionHeat": {
+      "china": 85,
+      "sea": 72,
+      "us": 90,
+      "eu": 88
+    },
+    "categories": ["服饰/穿搭", "家居/装饰", "数码/配件", "玩具/文创"],
+    "categoryMatchScores": {
+      "服饰/穿搭": 0.92,
+      "家居/装饰": 0.80,
+      "数码/配件": 0.85,
+      "玩具/文创": 0.95
+    },
+    "availability": "exclusive",
+    "exclusiveUntil": "2026-12-31",
+    "licenseExpiry": "2029-01-15"
+  },
+  {
+    "name": "青山刚昌·名侦探柯南",
+    "powerScore": 78,
+    "socialMentions": 950000,
+    "searchHeat": 85,
+    "merchandiseSales": 76,
+    "topicGrowth": 10.5,
+    "regionHeat": {
+      "china": 88,
+      "sea": 82,
+      "us": 55,
+      "eu": 40
+    },
+    "categories": ["数码/配件", "服饰/穿搭", "玩具/文创"],
+    "categoryMatchScores": {
+      "数码/配件": 0.88,
+      "服饰/穿搭": 0.82,
+      "玩具/文创": 0.90
+    },
+    "availability": "available",
+    "exclusiveUntil": null,
+    "licenseExpiry": "2027-12-31"
+  }
+]
