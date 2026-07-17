@@ -1,0 +1,209 @@
+version: '3.8'
+
+# ==============================================================================
+# 名创优品 AI 产品开发智能决策引擎 - Docker Compose 编排
+# ==============================================================================
+# 服务架构（三层微服务 + 飞书集成 + 前端）:
+#   - postgres    : TimescaleDB 时序数据库
+#   - redis       : 缓存 & 消息队列
+#   - trendpulse  : 数据感知层（趋势采集与分析）
+#   - ideaforge   : 决策推理层（核心，AI 决策引擎）
+#   - marketprobe : 验证反馈层（市场验证与反馈）
+#   - frontend    : Next.js 决策工作台（三栏布局）
+# ==============================================================================
+
+services:
+  # ----------------------------------------------------------------------------
+  # TimescaleDB - 时序数据库（基于 PostgreSQL 15）
+  # ----------------------------------------------------------------------------
+  postgres:
+    image: timescale/timescaledb:latest-pg15
+    container_name: miniso-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: miniso
+      POSTGRES_PASSWORD: miniso
+      POSTGRES_DB: miniso_ai
+      TZ: Asia/Shanghai
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - miniso-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U miniso -d miniso_ai"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ----------------------------------------------------------------------------
+  # Redis - 缓存 & Celery 消息队列
+  # ----------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: miniso-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - miniso-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ----------------------------------------------------------------------------
+  # TrendPulse - 数据感知层
+  # ----------------------------------------------------------------------------
+  trendpulse:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: miniso-trendpulse
+    restart: unless-stopped
+    ports:
+      - "${TRENDPULSE_PORT:-8001}:8000"
+    env_file:
+      - .env
+    environment:
+      - SERVICE_NAME=trendpulse
+      - SERVICE_PORT=8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - miniso-network
+    volumes:
+      - ./backend:/app
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ----------------------------------------------------------------------------
+  # IdeaForge - 决策推理层（核心）
+  # ----------------------------------------------------------------------------
+  ideaforge:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: miniso-ideaforge
+    restart: unless-stopped
+    ports:
+      - "${IDEAFORGE_PORT:-8002}:8000"
+    env_file:
+      - .env
+    environment:
+      - SERVICE_NAME=ideaforge
+      - SERVICE_PORT=8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - miniso-network
+    volumes:
+      - ./backend:/app
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ----------------------------------------------------------------------------
+  # MarketProbe - 验证反馈层
+  # ----------------------------------------------------------------------------
+  marketprobe:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: miniso-marketprobe
+    restart: unless-stopped
+    ports:
+      - "${MARKETPROBE_PORT:-8003}:8000"
+    env_file:
+      - .env
+    environment:
+      - SERVICE_NAME=marketprobe
+      - SERVICE_PORT=8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - miniso-network
+    volumes:
+      - ./backend:/app
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ----------------------------------------------------------------------------
+  # Frontend - Next.js 决策工作台
+  # ----------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: miniso-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    env_file:
+      - .env
+    environment:
+      - NEXT_PUBLIC_TRENDPULSE_URL=http://trendpulse:8000
+      - NEXT_PUBLIC_IDEAFORGE_URL=http://ideaforge:8000
+      - NEXT_PUBLIC_MARKETPROBE_URL=http://marketprobe:8000
+    depends_on:
+      trendpulse:
+        condition: service_started
+      ideaforge:
+        condition: service_started
+      marketprobe:
+        condition: service_started
+    networks:
+      - miniso-network
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+# ==============================================================================
+# 网络
+# ==============================================================================
+networks:
+  miniso-network:
+    driver: bridge
+    name: miniso-network
+
+# ==============================================================================
+# 数据卷
+# ==============================================================================
+volumes:
+  postgres_data:
+    name: miniso-postgres-data
+  redis_data:
+    name: miniso-redis-data
