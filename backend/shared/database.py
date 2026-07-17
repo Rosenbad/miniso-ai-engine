@@ -162,8 +162,9 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         except Exception:
             await session.rollback()
             raise
-        finally:
-            await session.close()
+        # 注意: 无需在此显式调用 session.close()。
+        # `async with AsyncSessionLocal() as session:` 上下文管理器退出时
+        # 会自动关闭会话 (调用 session.close())，重复调用是冗余的。
 
 
 # ==============================================================================

@@ -17,7 +17,10 @@ gunicorn==21.2.0
 # 数据库 ORM & 迁移
 # ------------------------------------------------------------------------------
 SQLAlchemy==2.0.27
+# psycopg2-binary: 同步驱动 (Alembic 迁移 / 脚本场景)
 psycopg2-binary==2.9.9
+# asyncpg: 异步驱动 (FastAPI / AsyncSession 依赖, database.py 使用 postgresql+asyncpg://)
+asyncpg==0.29.0
 alembic==1.13.1
 
 # ------------------------------------------------------------------------------

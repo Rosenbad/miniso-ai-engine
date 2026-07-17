@@ -658,3 +658,345 @@ class TestRedisModule:
         from shared.redis_client import _redis_pool
 
         assert _redis_pool is not None
+
+
+# ==============================================================================
+# _convert_to_async_url() 单元测试 (shared/database.py - I1)
+# ==============================================================================
+# 该函数为纯函数，无需真实数据库连接即可测试。
+# 覆盖四类输入: 同步 URL / psycopg2 URL / 已是 asyncpg URL / 非 PostgreSQL URL
+# ==============================================================================
+
+
+class TestConvertToAsyncUrl:
+    """测试 database._convert_to_async_url() 的 URL 协议转换逻辑。"""
+
+    def test_plain_postgresql_to_asyncpg(self) -> None:
+        """postgresql:// 应被转换为 postgresql+asyncpg://"""
+        from shared.database import _convert_to_async_url
+
+        url = "postgresql://miniso:miniso@localhost:5432/miniso_ai"
+        expected = "postgresql+asyncpg://miniso:miniso@localhost:5432/miniso_ai"
+        assert _convert_to_async_url(url) == expected
+
+    def test_postgresql_no_credentials_to_asyncpg(self) -> None:
+        """无凭证的 postgresql:// 也应正确转换。"""
+        from shared.database import _convert_to_async_url
+
+        url = "postgresql://localhost:5432/db"
+        expected = "postgresql+asyncpg://localhost:5432/db"
+        assert _convert_to_async_url(url) == expected
+
+    def test_psycopg2_to_asyncpg(self) -> None:
+        """postgresql+psycopg2:// 应被转换为 postgresql+asyncpg://"""
+        from shared.database import _convert_to_async_url
+
+        url = "postgresql+psycopg2://user:pass@localhost:5432/db"
+        expected = "postgresql+asyncpg://user:pass@localhost:5432/db"
+        assert _convert_to_async_url(url) == expected
+
+    def test_asyncpg_url_unchanged(self) -> None:
+        """postgresql+asyncpg:// 应保持不变 (幂等)。"""
+        from shared.database import _convert_to_async_url
+
+        url = "postgresql+asyncpg://user:pass@localhost:5432/db"
+        assert _convert_to_async_url(url) == url
+
+    def test_non_postgresql_url_unchanged(self) -> None:
+        """非 PostgreSQL URL (如 SQLite) 应原样返回。"""
+        from shared.database import _convert_to_async_url
+
+        url = "sqlite:///./test.db"
+        assert _convert_to_async_url(url) == url
+
+    def test_sqlite_in_memory_unchanged(self) -> None:
+        """SQLite 内存数据库 URL 应原样返回。"""
+        from shared.database import _convert_to_async_url
+
+        url = "sqlite:///:memory:"
+        assert _convert_to_async_url(url) == url
+
+    def test_mysql_url_unchanged(self) -> None:
+        """MySQL URL 应原样返回 (仅转换 PostgreSQL)。"""
+        from shared.database import _convert_to_async_url
+
+        url = "mysql://user:pass@localhost:3306/db"
+        assert _convert_to_async_url(url) == url
+
+
+# ==============================================================================
+# Redis 客户端行为测试 (shared/redis_client.py - I2)
+# ==============================================================================
+# 覆盖: 单例行为 / ping 成功与失败路径 / close_redis 重置单例
+# ==============================================================================
+
+
+class TestRedisClient:
+    """测试 redis_client 模块的单例行为与健康检查。"""
+
+    def test_get_redis_client_singleton(self, mocker: Any) -> None:
+        """两次调用 get_redis_client() 应返回同一实例 (单例)。"""
+        import shared.redis_client as redis_module
+
+        # 重置单例为 None 确保干净起点 (mocker 会在测试后自动恢复原值)
+        mocker.patch.object(redis_module, "_redis_client", None)
+        client1 = redis_module.get_redis_client()
+        client2 = redis_module.get_redis_client()
+        assert client1 is client2
+        # 再次调用仍应返回同一实例
+        assert redis_module.get_redis_client() is client1
+
+    def test_get_redis_client_caches_after_first_call(self, mocker: Any) -> None:
+        """单例建立后，get_redis_client 不应再重复构造新实例。"""
+        import shared.redis_client as redis_module
+
+        mocker.patch.object(redis_module, "_redis_client", None)
+        # 用 spy 监视 Redis 构造，验证只被调用一次
+        spy = mocker.patch(
+            "redis.asyncio.Redis", wraps=redis_module.aioredis.Redis
+        )
+        redis_module.get_redis_client()
+        redis_module.get_redis_client()
+        redis_module.get_redis_client()
+        assert spy.call_count == 1
+
+    async def test_ping_success(self, mocker: Any) -> None:
+        """ping() 在连接正常时应返回 True。"""
+        import shared.redis_client as redis_module
+
+        mock_client = mocker.AsyncMock()
+        mock_client.ping.return_value = True
+        mocker.patch.object(redis_module, "get_redis_client", return_value=mock_client)
+
+        result = await redis_module.ping()
+
+        assert result is True
+        mock_client.ping.assert_awaited_once()
+
+    async def test_ping_failure_returns_false(self, mocker: Any) -> None:
+        """ping() 在连接异常时应返回 False (捕获异常而非抛出)。"""
+        import shared.redis_client as redis_module
+
+        mock_client = mocker.AsyncMock()
+        mock_client.ping.side_effect = ConnectionError("connection refused")
+        mocker.patch.object(redis_module, "get_redis_client", return_value=mock_client)
+
+        result = await redis_module.ping()
+
+        assert result is False
+        mock_client.ping.assert_awaited_once()
+
+    async def test_ping_timeout_returns_false(self, mocker: Any) -> None:
+        """ping() 在超时异常时也应返回 False。"""
+        import shared.redis_client as redis_module
+
+        mock_client = mocker.AsyncMock()
+        mock_client.ping.side_effect = TimeoutError("request timed out")
+        mocker.patch.object(redis_module, "get_redis_client", return_value=mock_client)
+
+        result = await redis_module.ping()
+
+        assert result is False
+
+    async def test_close_redis_resets_singleton(self, mocker: Any) -> None:
+        """close_redis() 应重置单例为 None 并关闭客户端。"""
+        import shared.redis_client as redis_module
+
+        mock_client = mocker.AsyncMock()
+        mocker.patch.object(redis_module, "_redis_client", mock_client)
+        # 屏蔽真实连接池 disconnect，避免触碰真实 Redis
+        mocker.patch.object(redis_module._redis_pool, "disconnect", new=mocker.AsyncMock())
+
+        await redis_module.close_redis()
+
+        assert redis_module._redis_client is None
+        mock_client.aclose.assert_awaited_once()
+
+    async def test_close_redis_when_already_none(self, mocker: Any) -> None:
+        """单例已为 None 时 close_redis() 不应报错。"""
+        import shared.redis_client as redis_module
+
+        mocker.patch.object(redis_module, "_redis_client", None)
+        mocker.patch.object(redis_module._redis_pool, "disconnect", new=mocker.AsyncMock())
+
+        # 不应抛出异常
+        await redis_module.close_redis()
+        assert redis_module._redis_client is None
+
+
+# ==============================================================================
+# extra="forbid" 数据契约测试 (I3)
+# ==============================================================================
+# 所有模型均配置 extra="forbid"，传入未知字段应抛出 ValidationError。
+# ==============================================================================
+
+
+class TestExtraForbid:
+    """验证模型的 extra='forbid' 数据契约 - 未知字段应被拒绝。"""
+
+    def test_trend_signal_rejects_unknown_field(
+        self, trend_signal_data: Dict[str, Any]
+    ) -> None:
+        """TrendSignal 传入未知字段应抛出 ValidationError。"""
+        trend_signal_data["unknownField"] = "rogue"
+        with pytest.raises(ValidationError) as exc_info:
+            TrendSignal(**trend_signal_data)
+        errors = exc_info.value.errors()
+        assert any(e["type"] == "extra_forbidden" for e in errors)
+        assert any("unknownField" in str(e["loc"]) for e in errors)
+
+    def test_ip_match_rejects_unknown_field(
+        self, ip_match_data: Dict[str, Any]
+    ) -> None:
+        """IPMatch 传入未知字段应抛出 ValidationError。"""
+        ip_match_data["unknownField"] = "rogue"
+        with pytest.raises(ValidationError) as exc_info:
+            IPMatch(**ip_match_data)
+        errors = exc_info.value.errors()
+        assert any(e["type"] == "extra_forbidden" for e in errors)
+        assert any("unknownField" in str(e["loc"]) for e in errors)
+
+    def test_product_idea_card_rejects_unknown_field(
+        self, product_idea_card_data: Dict[str, Any]
+    ) -> None:
+        """ProductIdeaCard 传入未知字段应抛出 ValidationError。"""
+        product_idea_card_data["unknownField"] = "rogue"
+        with pytest.raises(ValidationError) as exc_info:
+            ProductIdeaCard(**product_idea_card_data)
+        errors = exc_info.value.errors()
+        assert any(e["type"] == "extra_forbidden" for e in errors)
+        assert any("unknownField" in str(e["loc"]) for e in errors)
+
+    def test_product_direction_rejects_unknown_field(
+        self, product_direction_data: Dict[str, Any]
+    ) -> None:
+        """ProductDirection 传入未知字段应抛出 ValidationError。"""
+        product_direction_data["unknownField"] = "rogue"
+        with pytest.raises(ValidationError) as exc_info:
+            ProductDirection(**product_direction_data)
+        assert any(e["type"] == "extra_forbidden" for e in exc_info.value.errors())
+
+    def test_product_concept_rejects_unknown_field(
+        self, product_concept_data: Dict[str, Any]
+    ) -> None:
+        """ProductConcept 传入未知字段应抛出 ValidationError。"""
+        product_concept_data["unknownField"] = "rogue"
+        with pytest.raises(ValidationError) as exc_info:
+            ProductConcept(**product_concept_data)
+        assert any(e["type"] == "extra_forbidden" for e in exc_info.value.errors())
+
+
+# ==============================================================================
+# validate_assignment=True 行为测试 (I4)
+# ==============================================================================
+# 所有模型均配置 validate_assignment=True，
+# 赋值非法值时应抛出 ValidationError，且原值保持不变。
+# ==============================================================================
+
+
+class TestValidateAssignment:
+    """验证模型的 validate_assignment=True - 赋值非法值应抛出 ValidationError。"""
+
+    def test_trend_signal_heat_score_assignment_upper_bound(
+        self, trend_signal_data: Dict[str, Any]
+    ) -> None:
+        """赋值 heatScore = 101 (>100) 应抛出 ValidationError。"""
+        signal = TrendSignal(**trend_signal_data)
+        original = signal.heatScore
+
+        with pytest.raises(ValidationError) as exc_info:
+            signal.heatScore = 101  # type: ignore[assignment]
+        assert any(e["loc"][-1] == "heatScore" for e in exc_info.value.errors())
+        # 赋值失败后原值应保持不变
+        assert signal.heatScore == original
+
+    def test_trend_signal_heat_score_assignment_lower_bound(
+        self, trend_signal_data: Dict[str, Any]
+    ) -> None:
+        """赋值 heatScore = -1 (<0) 应抛出 ValidationError。"""
+        signal = TrendSignal(**trend_signal_data)
+
+        with pytest.raises(ValidationError) as exc_info:
+            signal.heatScore = -1  # type: ignore[assignment]
+        assert any(e["loc"][-1] == "heatScore" for e in exc_info.value.errors())
+
+    def test_trend_signal_sentiment_assignment_invalid(
+        self, trend_signal_data: Dict[str, Any]
+    ) -> None:
+        """赋值 sentiment = 1.5 (>1) 应抛出 ValidationError。"""
+        signal = TrendSignal(**trend_signal_data)
+
+        with pytest.raises(ValidationError) as exc_info:
+            signal.sentiment = 1.5  # type: ignore[assignment]
+        assert any(e["loc"][-1] == "sentiment" for e in exc_info.value.errors())
+
+    def test_trend_signal_lifecycle_assignment_invalid(
+        self, trend_signal_data: Dict[str, Any]
+    ) -> None:
+        """赋值 lifecycle 非法枚举值应抛出 ValidationError。"""
+        signal = TrendSignal(**trend_signal_data)
+
+        with pytest.raises(ValidationError) as exc_info:
+            signal.lifecycle = "unknown"  # type: ignore[assignment]
+        assert any(e["loc"][-1] == "lifecycle" for e in exc_info.value.errors())
+
+    def test_trend_signal_valid_assignment_succeeds(
+        self, trend_signal_data: Dict[str, Any]
+    ) -> None:
+        """赋值合法值应成功更新 (对照组，验证正常路径)。"""
+        signal = TrendSignal(**trend_signal_data)
+        signal.heatScore = 50.0
+        assert signal.heatScore == 50.0
+
+    def test_ip_match_match_score_assignment_lower_bound(
+        self, ip_match_data: Dict[str, Any]
+    ) -> None:
+        """赋值 matchScore = -0.1 (<0) 应抛出 ValidationError。"""
+        match = IPMatch(**ip_match_data)
+        original = match.matchScore
+
+        with pytest.raises(ValidationError) as exc_info:
+            match.matchScore = -0.1  # type: ignore[assignment]
+        assert any(e["loc"][-1] == "matchScore" for e in exc_info.value.errors())
+        # 原值保持不变
+        assert match.matchScore == original
+
+    def test_ip_match_match_score_assignment_upper_bound(
+        self, ip_match_data: Dict[str, Any]
+    ) -> None:
+        """赋值 matchScore = 1.1 (>1) 应抛出 ValidationError。"""
+        match = IPMatch(**ip_match_data)
+
+        with pytest.raises(ValidationError) as exc_info:
+            match.matchScore = 1.1  # type: ignore[assignment]
+        assert any(e["loc"][-1] == "matchScore" for e in exc_info.value.errors())
+
+    def test_ip_match_ip_power_score_assignment_invalid(
+        self, ip_match_data: Dict[str, Any]
+    ) -> None:
+        """赋值 ipPowerScore = 101 (>100) 应抛出 ValidationError。"""
+        match = IPMatch(**ip_match_data)
+
+        with pytest.raises(ValidationError) as exc_info:
+            match.ipPowerScore = 101  # type: ignore[assignment]
+        assert any(e["loc"][-1] == "ipPowerScore" for e in exc_info.value.errors())
+
+    def test_ip_match_availability_assignment_invalid(
+        self, ip_match_data: Dict[str, Any]
+    ) -> None:
+        """赋值 availability 非法枚举值应抛出 ValidationError。"""
+        match = IPMatch(**ip_match_data)
+
+        with pytest.raises(ValidationError) as exc_info:
+            match.availability = "maybe"  # type: ignore[assignment]
+        assert any(e["loc"][-1] == "availability" for e in exc_info.value.errors())
+
+    def test_product_idea_card_hit_score_assignment_invalid(
+        self, product_idea_card_data: Dict[str, Any]
+    ) -> None:
+        """赋值 hitScore = 1.5 (>1) 应抛出 ValidationError。"""
+        card = ProductIdeaCard(**product_idea_card_data)
+
+        with pytest.raises(ValidationError) as exc_info:
+            card.hitScore = 1.5  # type: ignore[assignment]
+        assert any(e["loc"][-1] == "hitScore" for e in exc_info.value.errors())
