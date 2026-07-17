@@ -182,7 +182,7 @@ class TestCircuitBreaker:
         assert cb.state == CircuitState.HALF_OPEN
 
     async def test_half_open_is_available(self, mocker: Any) -> None:
-        """HALF_OPEN 状态下 is_available() 应返回 True (允许探测请求)。"""
+        """HALF_OPEN 状态下仅首个探测请求 is_available() 返回 True。"""
         time_now = {"t": 0.0}
         mocker.patch(
             "trendpulse.collectors.base.time.monotonic",
@@ -192,9 +192,11 @@ class TestCircuitBreaker:
         for _ in range(3):
             await cb.record_failure()
         time_now["t"] = 61.0
-        await cb.is_available()  # 触发 → HALF_OPEN
-        # HALF_OPEN 仍然 available
+        # 首次: OPEN → HALF_OPEN, 占用唯一探测名额
         assert await cb.is_available() is True
+        assert cb.state == CircuitState.HALF_OPEN
+        # 第二次: 探测进行中, 拒绝其余请求 (避免并发多探测)
+        assert await cb.is_available() is False
 
     async def test_half_open_success_closes_circuit(self, mocker: Any) -> None:
         """HALF_OPEN 状态下成功 → 回到 CLOSED。"""
@@ -225,6 +227,52 @@ class TestCircuitBreaker:
         await cb.is_available()  # → HALF_OPEN
         await cb.record_failure()
         assert cb.state == CircuitState.OPEN
+
+    async def test_half_open_probe_reset_allows_next_probe(self, mocker: Any) -> None:
+        """探测完成后 (record_failure 复位标志) 允许下一次探测。"""
+        time_now = {"t": 0.0}
+        mocker.patch(
+            "trendpulse.collectors.base.time.monotonic",
+            side_effect=lambda: time_now["t"],
+        )
+        cb = CircuitBreaker(failure_threshold=3, recovery_timeout=60)
+        for _ in range(3):
+            await cb.record_failure()
+        time_now["t"] = 61.0
+        # 首个探测请求被允许
+        assert await cb.is_available() is True
+        # 探测进行中, 第二个被拒
+        assert await cb.is_available() is False
+        # 探测失败 → 复位标志, 回到 OPEN
+        await cb.record_failure()
+        assert cb.state == CircuitState.OPEN
+        # 再次超过 recovery_timeout → 允许新的探测
+        time_now["t"] = 122.0
+        assert await cb.is_available() is True
+        # 新的探测进行中, 再次被拒
+        assert await cb.is_available() is False
+
+    async def test_half_open_probe_reset_on_success(self, mocker: Any) -> None:
+        """探测成功后 (record_success 复位标志) 状态回到 CLOSED。"""
+        time_now = {"t": 0.0}
+        mocker.patch(
+            "trendpulse.collectors.base.time.monotonic",
+            side_effect=lambda: time_now["t"],
+        )
+        cb = CircuitBreaker(failure_threshold=3, recovery_timeout=60)
+        for _ in range(3):
+            await cb.record_failure()
+        time_now["t"] = 61.0
+        # 首个探测请求被允许
+        assert await cb.is_available() is True
+        # 探测进行中, 第二个被拒
+        assert await cb.is_available() is False
+        # 探测成功 → 复位标志, 回到 CLOSED
+        await cb.record_success()
+        assert cb.state == CircuitState.CLOSED
+        # CLOSED 状态下所有请求均可通过
+        assert await cb.is_available() is True
+        assert await cb.is_available() is True
 
     async def test_within_recovery_timeout_stays_open(self, mocker: Any) -> None:
         """OPEN 状态在 recovery_timeout 之内应保持 OPEN。"""
@@ -266,7 +314,7 @@ class TestRetryMechanism:
     # --- 全部失败 ---
 
     async def test_all_failures_raises_after_max_attempts(self, mocker: Any) -> None:
-        """全部失败时，func 被调用 max_retries 次后抛出最后一个异常。"""
+        """全部失败时，func 被调用 (max_retries + 1) 次后抛出最后一个异常。"""
         mocker.patch(
             "trendpulse.collectors.base.asyncio.sleep", new=mocker.AsyncMock()
         )
@@ -276,10 +324,11 @@ class TestRetryMechanism:
         with pytest.raises(RuntimeError, match="network error"):
             await collector._retry_with_backoff(func)
 
-        assert func.call_count == 3
+        # max_retries=3 → 总尝试 4 次 (1 次初始 + 3 次重试)
+        assert func.call_count == 4
 
     async def test_all_failures_with_custom_retries(self, mocker: Any) -> None:
-        """max_retries=5 时应重试 5 次。"""
+        """max_retries=5 时总尝试 6 次 (1 次初始 + 5 次重试)。"""
         mocker.patch(
             "trendpulse.collectors.base.asyncio.sleep", new=mocker.AsyncMock()
         )
@@ -289,7 +338,7 @@ class TestRetryMechanism:
         with pytest.raises(ValueError):
             await collector._retry_with_backoff(func)
 
-        assert func.call_count == 5
+        assert func.call_count == 6
 
     # --- 中途成功 ---
 
@@ -321,7 +370,7 @@ class TestRetryMechanism:
         sleep_mock.assert_not_called()
 
     async def test_success_on_third_attempt(self, mocker: Any) -> None:
-        """第 3 次 (最后一次) 成功时返回数据。"""
+        """第 3 次尝试成功时返回数据，不再继续重试。"""
         mocker.patch(
             "trendpulse.collectors.base.asyncio.sleep", new=mocker.AsyncMock()
         )
@@ -346,7 +395,7 @@ class TestRetryMechanism:
         assert BACKOFF_DELAYS == [0.5, 1.0, 2.0]
 
     async def test_exponential_backoff_sleep_calls(self, mocker: Any) -> None:
-        """3 次失败时 sleep 被调用 2 次，延迟依次为 0.5s 和 1.0s。"""
+        """max_retries=3 (4 次尝试) 时 sleep 被调用 3 次，延迟依次为 0.5/1.0/2.0s。"""
         sleep_mock = mocker.patch(
             "trendpulse.collectors.base.asyncio.sleep", new=mocker.AsyncMock()
         )
@@ -356,16 +405,17 @@ class TestRetryMechanism:
         with pytest.raises(RuntimeError):
             await collector._retry_with_backoff(func)
 
-        # 3 次尝试 → 2 次 sleep (在第 1、2 次失败后)
-        assert sleep_mock.await_count == 2
+        # max_retries=3 → 4 次尝试 → 3 次 sleep (在第 1/2/3 次失败后)
+        # 延迟序列完整覆盖 BACKOFF_DELAYS = [0.5, 1.0, 2.0]
+        assert sleep_mock.await_count == 3
         actual_delays = [
             call.args[0] if call.args else call.kwargs.get("delay")
             for call in sleep_mock.call_args_list
         ]
-        assert actual_delays == [0.5, 1.0]
+        assert actual_delays == [0.5, 1.0, 2.0]
 
     async def test_exponential_backoff_all_three_delays(self, mocker: Any) -> None:
-        """max_retries=4 时 3 次 sleep 延迟依次为 0.5s, 1.0s, 2.0s。"""
+        """max_retries=4 (5 次尝试) 时 4 次 sleep 延迟为 0.5/1.0/2.0/2.0s (超出后取末值)。"""
         sleep_mock = mocker.patch(
             "trendpulse.collectors.base.asyncio.sleep", new=mocker.AsyncMock()
         )
@@ -375,12 +425,14 @@ class TestRetryMechanism:
         with pytest.raises(RuntimeError):
             await collector._retry_with_backoff(func)
 
-        assert sleep_mock.await_count == 3
+        # max_retries=4 → 5 次尝试 → 4 次 sleep
+        # 第 4 次退避超出 BACKOFF_DELAYS 长度, 取末值 2.0
+        assert sleep_mock.await_count == 4
         actual_delays = [
             call.args[0] if call.args else call.kwargs.get("delay")
             for call in sleep_mock.call_args_list
         ]
-        assert actual_delays == [0.5, 1.0, 2.0]
+        assert actual_delays == [0.5, 1.0, 2.0, 2.0]
 
     async def test_retry_passes_kwargs_to_func(self, mocker: Any) -> None:
         """_retry_with_backoff 应将 kwargs 透传给 func。"""
@@ -428,6 +480,16 @@ class TestBaseCollector:
         assert collector.qps_limit == 5.0
         assert collector.cache_ttl == 1800
         assert collector.max_retries == 5
+
+    def test_max_retries_validation_rejects_zero(self) -> None:
+        """max_retries=0 时应抛出 ValueError (避免空循环导致 AssertionError)。"""
+        with pytest.raises(ValueError, match="max_retries must be >= 1"):
+            _TestCollector(max_retries=0)
+
+    def test_max_retries_validation_rejects_negative(self) -> None:
+        """max_retries<0 时应抛出 ValueError。"""
+        with pytest.raises(ValueError, match="max_retries must be >= 1"):
+            _TestCollector(max_retries=-1)
 
     # --- 成功采集 ---
 

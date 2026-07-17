@@ -21,16 +21,19 @@
 
 核心组件:
     - CircuitState        : 熔断器状态枚举
-    - CircuitBreaker      - 熔断器 (3 态状态机, asyncio.Lock 线程安全)
+    - CircuitBreaker      - 熔断器 (3 态状态机, asyncio.Lock 异步并发安全)
     - CircuitBreakerOpenError : 熔断器开启异常
     - BaseCollector       : 采集器抽象基类 (限流 + 重试 + 熔断 + 缓存)
 
 设计要点:
     - QPS 限流: 基于 time.monotonic() 跟踪上次调用时间, 超速时 asyncio.sleep
-    - 指数退避: BACKOFF_DELAYS = [0.5, 1.0, 2.0], 最多重试 max_retries 次
+    - 指数退避: BACKOFF_DELAYS = [0.5, 1.0, 2.0], 重试 max_retries 次 (总尝试 max_retries+1 次)
     - 熔断器: 连续 failure_threshold 次失败 → OPEN, recovery_timeout 后 → HALF_OPEN
     - Redis 缓存: JSON 序列化, TTL = cache_ttl (默认 3600s = 1 小时)
     - 优雅降级: Redis 不可用时缓存层静默跳过, 不影响采集主流程
+
+注: 本模块使用 asyncio.Lock 提供协程级并发安全 (async-safe),
+    而非线程安全 (thread-safe)。跨线程使用需额外同步。
 """
 
 from __future__ import annotations
@@ -119,12 +122,12 @@ class CircuitBreakerOpenError(Exception):
 
 
 class CircuitBreaker:
-    """熔断器 - 基于 asyncio.Lock 的异步线程安全状态机。
+    """熔断器 - 基于 asyncio.Lock 的异步并发安全状态机。
 
     状态:
         CLOSED    : 正常，允许请求
         OPEN      : 熔断，快速拒绝 (可降级返回缓存)
-        HALF_OPEN : 探测，允许单个请求测试恢复
+        HALF_OPEN : 探测，仅允许「单个」请求测试恢复 (并发探测会被拒绝)
 
     配置:
         failure_threshold : 连续失败次数阈值 (默认 3)
@@ -142,9 +145,10 @@ class CircuitBreaker:
         else:
             raise CircuitBreakerOpenError("source")
 
-    线程安全:
+    异步并发安全 (async-safe, 非线程安全):
         所有状态变更方法 (record_success / record_failure / is_available)
-        均通过 asyncio.Lock 保护，适合异步并发场景。
+        均通过 asyncio.Lock 保护，适合协程并发场景。
+        asyncio.Lock 仅保证协程级互斥，跨线程使用需额外同步。
     """
 
     def __init__(
@@ -158,6 +162,9 @@ class CircuitBreaker:
         self._failure_count: int = 0
         self._opened_at: float = 0.0
         self._lock: asyncio.Lock = asyncio.Lock()
+        # HALF_OPEN 探测标志: 同一时刻仅允许单个探测请求通过,
+        # 由 is_available() 置位, record_success()/record_failure() 复位。
+        self._probe_in_progress: bool = False
 
     # --- 只读属性 ---
 
@@ -181,16 +188,18 @@ class CircuitBreaker:
         """恢复超时配置 (秒)。"""
         return self._recovery_timeout
 
-    # --- 状态变更方法 (异步, 线程安全) ---
+    # --- 状态变更方法 (异步, 协程安全) ---
 
     async def record_success(self) -> None:
         """记录一次成功请求。
 
         - 重置失败计数为 0
         - 将状态设为 CLOSED (无论之前是 CLOSED / HALF_OPEN / OPEN)
+        - 复位 HALF_OPEN 探测标志, 允许后续新的探测周期
         """
         async with self._lock:
             self._failure_count = 0
+            self._probe_in_progress = False
             if self._state is not CircuitState.CLOSED:
                 logger.debug(
                     f"CircuitBreaker: {self._state.value} → CLOSED (成功重置)"
@@ -203,8 +212,10 @@ class CircuitBreaker:
         - 递增失败计数
         - 若失败计数 >= failure_threshold，状态转为 OPEN 并记录开启时间
         - 若当前为 HALF_OPEN，直接转回 OPEN (探测失败)
+        - 复位 HALF_OPEN 探测标志, 允许下一个 recovery_timeout 后的新探测
         """
         async with self._lock:
+            self._probe_in_progress = False
             # HALF_OPEN 状态下任何失败都立即重回 OPEN
             if self._state is CircuitState.HALF_OPEN:
                 self._state = CircuitState.OPEN
@@ -227,12 +238,14 @@ class CircuitBreaker:
         """检查是否允许请求通过。
 
         - CLOSED    → True
-        - OPEN      → 检查是否超过 recovery_timeout，若是则转为 HALF_OPEN 并返回 True
-        - HALF_OPEN → True (允许探测)
+        - OPEN      → 检查是否超过 recovery_timeout，若是则转为 HALF_OPEN
+                      并占用唯一探测名额返回 True
+        - HALF_OPEN → 仅首个探测请求返回 True (置位 _probe_in_progress)，
+                      其余并发请求返回 False (避免多个探测同时打到后端)
 
         返回:
             True  : 请求可以继续
-            False : 请求应被快速拒绝 (熔断中)
+            False : 请求应被快速拒绝 (熔断中 / 探测名额已被占用)
         """
         async with self._lock:
             if self._state is CircuitState.CLOSED:
@@ -243,14 +256,18 @@ class CircuitBreaker:
                 elapsed = time.monotonic() - self._opened_at
                 if elapsed >= self._recovery_timeout:
                     self._state = CircuitState.HALF_OPEN
+                    self._probe_in_progress = True
                     logger.info(
                         f"CircuitBreaker: OPEN → HALF_OPEN "
-                        f"(恢复超时 {self._recovery_timeout}s 已过)"
+                        f"(恢复超时 {self._recovery_timeout}s 已过, 允许单个探测)"
                     )
                     return True
                 return False
 
-            # HALF_OPEN
+            # HALF_OPEN: 仅允许单个探测请求, 探测进行中则拒绝其余请求
+            if self._probe_in_progress:
+                return False
+            self._probe_in_progress = True
             return True
 
 
@@ -274,7 +291,7 @@ class BaseCollector(ABC):
         name            : 采集器名称 (如 "xiaohongshu", "tiktok")
         qps_limit       : 每秒最大查询数 (默认 1.0)
         cache_ttl       : 缓存存活时间秒 (默认 3600 = 1 小时)
-        max_retries     : 最大重试次数 (默认 3)
+        max_retries     : 最大「重试」次数 (默认 3, 总尝试次数 = max_retries + 1)
         circuit_breaker : 可选的 CircuitBreaker 实例 (不传则自动创建)
 
     用法示例::
@@ -301,6 +318,14 @@ class BaseCollector(ABC):
         max_retries: int = 3,
         circuit_breaker: Optional[CircuitBreaker] = None,
     ) -> None:
+        # 校验 max_retries: 必须 >= 1 (避免 range(max_retries) 为空导致
+        # last_exc 未赋值, 进而触发 AssertionError)
+        if max_retries < 1:
+            raise ValueError(
+                f"max_retries must be >= 1 (got {max_retries}); "
+                f"max_retries 表示重试次数, 总尝试次数 = max_retries + 1"
+            )
+
         self.name: str = name
         self.qps_limit: float = qps_limit
         self.cache_ttl: int = cache_ttl
@@ -313,6 +338,9 @@ class BaseCollector(ABC):
             1.0 / qps_limit if qps_limit > 0 else 0.0
         )
         self._last_call_time: float = 0.0
+        # 限流锁: 保护「读取 _last_call_time → sleep → 更新 _last_call_time」
+        # 整段读-睡-写操作, 避免并发协程竞态导致 QPS 失效 (async-safe)
+        self._rate_lock: asyncio.Lock = asyncio.Lock()
 
     # ==================================================================
     # 抽象方法 - 子类必须实现
@@ -342,11 +370,13 @@ class BaseCollector(ABC):
 
         流程 (spec §3.5):
             1. 检查熔断器 — OPEN 时尝试缓存降级，无缓存则抛 CircuitBreakerOpenError
-            2. 检查限流   — 距上次调用不足 _min_interval 则 sleep
-            3. 检查缓存   — 命中则直接返回 (不调用 _fetch)
-            4. 重试采集   — _fetch + 指数退避重试
+            2. 检查缓存   — 命中则直接返回 (不调用 _fetch, 不消耗限流配额)
+            3. 检查限流   — 距上次调用不足 _min_interval 则 sleep
+            4. 重试采集   — _fetch + 指数退避重试 (1 次初始 + max_retries 次重试)
             5. 成功       — record_success + 写缓存
             6. 失败       — record_failure + 尝试缓存降级，无缓存则抛异常
+
+        注: 缓存检查先于限流检查, 这样缓存命中时无需付出限流等待代价。
 
         参数:
             **kwargs : 传递给 _fetch 的采集参数
@@ -372,14 +402,14 @@ class BaseCollector(ABC):
                 return cached
             raise CircuitBreakerOpenError(self.name)
 
-        # --- Step 2: QPS 限流 ---
-        await self._check_rate_limit()
-
-        # --- Step 3: 缓存检查 ---
+        # --- Step 2: 缓存检查 (先于限流, 命中则不消耗限流配额) ---
         cached = await self._get_cached(cache_key)
         if cached is not None:
             logger.debug(f"[{self.name}] 缓存命中 (key={cache_key})")
             return cached
+
+        # --- Step 3: QPS 限流 ---
+        await self._check_rate_limit()
 
         # --- Step 4: 重试采集 ---
         try:
@@ -420,10 +450,15 @@ class BaseCollector(ABC):
         """对 func 执行指数退避重试。
 
         策略:
-            - 最多尝试 max_retries 次
+            - 总尝试次数 = max_retries + 1 (1 次初始尝试 + max_retries 次重试)
             - 每次失败后等待 BACKOFF_DELAYS[attempt] 秒 (0.5 / 1.0 / 2.0)
             - 成功则立即返回
             - 全部失败则抛出最后一个异常
+
+        注: ``max_retries`` 表示「重试次数」而非「总尝试次数」。
+            例: max_retries=3 → 4 次尝试 (1 初始 + 3 重试), 3 次退避
+            (0.5s / 1.0s / 2.0s)。这与 spec §3.5
+            「失败重试 3 次 + 指数退避 (0.5s / 1s / 2s)」一致。
 
         参数:
             func     : 要重试的异步可调用对象
@@ -434,28 +469,32 @@ class BaseCollector(ABC):
             func 的返回值
 
         异常:
-            所有 max_retries 次尝试均失败后，抛出最后一个异常
+            所有 (max_retries + 1) 次尝试均失败后，抛出最后一个异常
         """
         last_exc: Optional[BaseException] = None
-        for attempt in range(self.max_retries):
+        total_attempts: int = self.max_retries + 1
+        for attempt in range(total_attempts):
             try:
                 return await func(*args, **kwargs)
             except Exception as exc:
                 last_exc = exc
-                if attempt < self.max_retries - 1:
+                if attempt < self.max_retries:
+                    # 非最后一次尝试: 等待退避后重试
                     # 获取退避延迟: 超出 BACKOFF_DELAYS 长度时取最后一个
                     delay: float = BACKOFF_DELAYS[
                         min(attempt, len(BACKOFF_DELAYS) - 1)
                     ]
                     logger.debug(
-                        f"[{self.name}] 第 {attempt + 1}/{self.max_retries} 次失败, "
+                        f"[{self.name}] 第 {attempt + 1}/{total_attempts} 次尝试失败, "
                         f"{delay}s 后重试: {exc}"
                     )
                     await asyncio.sleep(delay)
 
-        # 所有重试均失败
-        assert last_exc is not None  # max_retries >= 1 时一定有异常
-        raise last_exc
+        # 所有尝试均失败。
+        # max_retries >= 1 已在 __init__ 校验, 循环至少执行一次, last_exc 必已赋值;
+        # 此处用显式判空替代 assert, 避免极端情况下 AssertionError 掩盖真实异常。
+        if last_exc is not None:
+            raise last_exc
 
     # ==================================================================
     # QPS 限流
@@ -464,25 +503,28 @@ class BaseCollector(ABC):
     async def _check_rate_limit(self) -> None:
         """QPS 限流检查 — 距上次调用不足 _min_interval 时 sleep。
 
-        实现:
-            - 记录上次调用时间 _last_call_time
+        实现 (异步并发安全):
+            - 通过 _rate_lock 保护「读取 _last_call_time → sleep → 更新时间」
+              整段读-睡-写操作, 避免并发协程同时读到旧的 _last_call_time
+              而全部跳过等待, 导致 QPS 限流失效
             - 若 elapsed < _min_interval，sleep (interval - elapsed)
             - 更新 _last_call_time 为当前时间
         """
         if self._min_interval <= 0:
             return
 
-        now: float = time.monotonic()
-        elapsed: float = now - self._last_call_time
-        if elapsed < self._min_interval:
-            wait: float = self._min_interval - elapsed
-            logger.debug(
-                f"[{self.name}] QPS 限流: 等待 {wait:.3f}s "
-                f"(QPS={self.qps_limit}, 已过 {elapsed:.3f}s)"
-            )
-            await asyncio.sleep(wait)
+        async with self._rate_lock:
+            now: float = time.monotonic()
+            elapsed: float = now - self._last_call_time
+            if elapsed < self._min_interval:
+                wait: float = self._min_interval - elapsed
+                logger.debug(
+                    f"[{self.name}] QPS 限流: 等待 {wait:.3f}s "
+                    f"(QPS={self.qps_limit}, 已过 {elapsed:.3f}s)"
+                )
+                await asyncio.sleep(wait)
 
-        self._last_call_time = time.monotonic()
+            self._last_call_time = time.monotonic()
 
     # ==================================================================
     # Redis 缓存
