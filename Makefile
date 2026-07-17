@@ -20,7 +20,8 @@ SHELL := /bin/bash
 DC := docker compose
 
 .PHONY: up down build rebuild test install-be install-fe logs ps \
-        init-db migrate shell-db clean help
+        init-db migrate shell-db clean clean-all help \
+        test-trendpulse test-ideaforge test-marketprobe test-fe
 
 # ------------------------------------------------------------------------------
 # Docker 服务管理
@@ -131,8 +132,11 @@ help:
 	@echo "  make install-fe  安装前端依赖"
 	@echo ""
 	@echo "测试:"
-	@echo "  make test        运行后端测试"
-	@echo "  make test-fe     运行前端测试"
+	@echo "  make test                 运行后端测试"
+	@echo "  make test-trendpulse      运行 TrendPulse 服务测试"
+	@echo "  make test-ideaforge       运行 IdeaForge 服务测试"
+	@echo "  make test-marketprobe     运行 MarketProbe 服务测试"
+	@echo "  make test-fe              运行前端测试"
 	@echo ""
 	@echo "数据库:"
 	@echo "  make init-db     初始化数据库"

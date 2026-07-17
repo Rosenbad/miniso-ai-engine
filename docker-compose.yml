@@ -1,5 +1,3 @@
-version: '3.8'
-
 # ==============================================================================
 # 名创优品 AI 产品开发智能决策引擎 - Docker Compose 编排
 # ==============================================================================
@@ -21,9 +19,9 @@ services:
     container_name: miniso-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: miniso
-      POSTGRES_PASSWORD: miniso
-      POSTGRES_DB: miniso_ai
+      POSTGRES_USER: ${POSTGRES_USER:-miniso}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-miniso}
+      POSTGRES_DB: ${POSTGRES_DB:-miniso_ai}
       TZ: Asia/Shanghai
     ports:
       - "5432:5432"

@@ -5,12 +5,12 @@
 # 通过 SERVICE_NAME 环境变量区分服务
 # ==============================================================================
 
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 # 设置环境变量
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONSEED=42 \
+    PYTHONHASHSEED=42 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     TZ=Asia/Shanghai
@@ -31,7 +31,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 安装 Playwright 浏览器（用于数据采集）
-RUN playwright install --with-deps chromium || true
+RUN playwright install --with-deps chromium
 
 # 复制项目代码
 COPY . .
