@@ -77,9 +77,13 @@ yarn-error.log*
 backend/data/*
 !backend/data/.gitkeep
 !backend/data/ip_database.json
+!backend/data/generate_mock_skus.py
+!backend/data/mock_skus.csv
+!backend/data/xgboost_model.json
 *.csv
 *.xlsx
 *.parquet
+!backend/data/mock_skus.csv
 
 # ------------------------------------------------------------------------------
 # Playwright
