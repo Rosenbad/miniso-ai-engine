@@ -15,7 +15,10 @@
 #   - 使用 httpx.AsyncClient 异步 HTTP 请求, 默认 10s 超时
 #   - base_url 可通过构造器 / 环境变量配置 (测试灵活性)
 #   - 采集热门视频/话题, 含播放量/点赞/分享等带货指标
-#   - 优雅降级: HTTP 错误 / API 错误码 / 空响应 / 畸形数据均返回空列表
+#   - keyword 支持: 传入关键词时走搜索端点, 未传时走热门榜端点
+#   - 异常分级: HTTP 错误 / API 错误码 / JSON 解析失败均向上抛出
+#     (由 BaseCollector 的重试 / 熔断 / 缓存机制处理);
+#     仅 API 成功 (status_code=0) 但数据列表为空时返回 []
 # ==============================================================================
 
 """
@@ -29,6 +32,9 @@
 用法::
 
     collector = DouyinCollector()
+    # 不传 keyword: 获取热门榜
+    data = await collector.collect(keyword="", limit=20)
+    # 传 keyword: 按关键词搜索
     data = await collector.collect(keyword="好物", limit=20)
     # data: [{"topic", "source", "description", "likes", "shares",
     #         "play_count", "author", "url"}, ...]
@@ -41,32 +47,21 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-try:
-    from loguru import logger
-except ImportError:  # pragma: no cover
-    import logging
-
-    logger = logging.getLogger(__name__)  # type: ignore[assignment]
-
 from trendpulse.collectors.base import BaseCollector
+from trendpulse.collectors.utils import safe_int, setup_logger
+
+logger = setup_logger(__name__)
 
 
 # ==============================================================================
-# 辅助函数 - 安全类型转换
+# API 端点路径配置
 # ==============================================================================
 
+# 热门榜端点 (无关键词时使用)
+_TRENDING_PATH: str = "/web/hot/search/list"
 
-def _safe_int(value: Any, default: int = 0) -> int:
-    """安全转换为 int, 失败时返回 default。
-
-    处理 None / 空字符串 / 非数字字符串等异常输入。
-    """
-    try:
-        if value is None or value == "":
-            return default
-        return int(value)
-    except (ValueError, TypeError):
-        return default
+# 搜索端点 (有关键词时使用)
+_SEARCH_PATH: str = "/web/search/item/"
 
 
 # ==============================================================================
@@ -84,12 +79,19 @@ class DouyinCollector(BaseCollector):
         **kwargs : 传递给 BaseCollector
 
     采集参数 (_fetch):
-        keyword : 搜索关键词 (可选, 用于过滤)
+        keyword : 搜索关键词 (可选)
+                  - 传入非空关键词: 走搜索端点, 按关键词搜索视频
+                  - 未传 / 空字符串: 走热门榜端点, 获取全站热门视频
         limit   : 返回视频数量上限 (默认 20)
 
     返回格式:
         [{"topic", "source", "description", "likes", "shares",
           "play_count", "author", "url"}, ...]
+
+    异常:
+        _fetch 在 HTTP 失败 / 非 200 / JSON 解析失败 / API 业务错误码
+        (status_code != 0) 时向上抛出异常, 由 BaseCollector 的
+        重试 / 熔断 / 缓存机制处理; 仅当 API 成功但 list 为空时返回 []。
     """
 
     def __init__(
@@ -114,71 +116,89 @@ class DouyinCollector(BaseCollector):
         limit: int = 20,
         **kwargs: Any,
     ) -> List[Dict[str, Any]]:
-        """执行抖音热门视频采集。
+        """执行抖音视频采集。
 
         创建 httpx.AsyncClient 上下文, 委托给 _get_trending 执行实际请求与解析。
+        异常向上抛出 (不吞没), 由 BaseCollector 处理重试 / 熔断 / 缓存降级。
 
         参数:
-            keyword : 搜索关键词 (可选)
+            keyword : 搜索关键词 (可选; 非空走搜索端点, 空走热门榜端点)
             limit   : 返回数量上限
 
         返回:
-            解析后的视频数据列表; 任何错误均返回空列表 (不抛异常)
+            解析后的视频数据列表; API 成功但 list 为空时返回 []
+
+        异常:
+            httpx.HTTPError / 网络异常 / 非 200 状态码 /
+            JSON 解析失败 / API 业务错误码均向上抛出
         """
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                return await self._get_trending(client, limit)
-        except Exception as exc:
-            logger.warning(f"[douyin] _fetch 异常, 返回空列表: {exc}")
-            return []
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            return await self._get_trending(client, keyword, limit)
 
     # ==================================================================
-    # _get_trending - 获取热门视频列表
+    # _get_trending - 获取热门视频 / 搜索视频列表
     # ==================================================================
 
     async def _get_trending(
         self,
         client: httpx.AsyncClient,
-        limit: int,
+        keyword: str = "",
+        limit: int = 20,
     ) -> List[Dict[str, Any]]:
-        """通过抖音热门 API 获取视频列表并解析。
+        """通过抖音 API 获取视频列表并解析。
+
+        根据是否传入 keyword 选择端点:
+            - keyword 非空: 调用搜索端点, params 含 keyword
+            - keyword 空  : 调用热门榜端点
 
         参数:
-            client : httpx.AsyncClient 实例
-            limit  : 返回数量上限
+            client  : httpx.AsyncClient 实例
+            keyword : 搜索关键词 (可选; 决定使用搜索 / 热门榜端点)
+            limit   : 返回数量上限
 
         返回:
-            解析后的视频数据列表; HTTP 错误 / API 错误码 / 空结果均返回空列表
-        """
-        url = f"{self.base_url}/web/hot/search/list"
-        params = {"count": limit}
+            解析后的视频数据列表; API 成功 (status_code=0) 但 list 为空时返回 []
 
-        try:
-            response = await client.get(url, params=params)
-        except Exception as exc:
-            logger.warning(f"[douyin] 请求失败: {exc}")
-            return []
+        异常:
+            - httpx.HTTPError 等: 网络请求失败 (向上抛出, 触发重试)
+            - RuntimeError: HTTP 非 200 / JSON 解析失败 / API 业务错误码 (status_code != 0)
+        """
+        # 根据是否传入 keyword 选择端点与参数
+        if keyword:
+            url = f"{self.base_url}{_SEARCH_PATH}"
+            params: Dict[str, Any] = {
+                "keyword": keyword,
+                "count": limit,
+                "search_source": "normal_search",
+            }
+        else:
+            url = f"{self.base_url}{_TRENDING_PATH}"
+            params = {"count": limit}
+
+        # HTTP 请求异常 (网络错误 / 超时) 直接向上抛出, 触发 BaseCollector 重试
+        response = await client.get(url, params=params)
 
         if response.status_code != 200:
-            logger.debug(f"[douyin] HTTP {response.status_code}, 跳过")
-            return []
+            raise RuntimeError(
+                f"[douyin] HTTP 请求失败, 状态码: {response.status_code}"
+            )
 
-        try:
-            data = response.json()
-        except Exception as exc:
-            logger.warning(f"[douyin] JSON 解析失败: {exc}")
-            return []
+        # JSON 解析失败向上抛出 (若 .json() 抛 ValueError, 不再吞没)
+        data = response.json()
 
-        # 校验 API 业务码: status_code == 0 表示成功
+        # 校验 API 业务码: status_code == 0 表示成功, 否则视为业务失败 (向上抛出)
         if data.get("status_code", -1) != 0:
-            logger.debug(f"[douyin] API 错误码: {data.get('status_code')}")
-            return []
+            raise RuntimeError(
+                f"[douyin] API 业务错误码: status_code={data.get('status_code')}, "
+                f"status_msg={data.get('status_msg', '')}"
+            )
 
-        items: List[Dict[str, Any]] = (
-            data.get("data", {}).get("list", [])
-            if isinstance(data.get("data"), dict)
-            else []
-        )
+        # API 成功: 提取 list 列表 (防御性处理 data["data"] 结构缺失)
+        raw_data = data.get("data")
+        if not isinstance(raw_data, dict):
+            # status_code=0 但 data 结构异常, 视为 API 契约违反, 返回空列表
+            return []
+        items: List[Dict[str, Any]] = raw_data.get("list", [])
         return [self._parse_video(item) for item in items]
 
     # ==================================================================
@@ -195,7 +215,7 @@ class DouyinCollector(BaseCollector):
 
         返回:
             {topic, source, description, likes, shares, play_count, author, url}
-            缺失字段返回默认值 (空字符串 / 0), 不抛异常
+            缺失字段返回默认值 (空字符串 / 0), 不抛异常 (解析层保持防御性)
         """
         statistics: Dict[str, Any] = raw_video.get("statistics", {}) or {}
         author: Dict[str, Any] = raw_video.get("author", {}) or {}
@@ -212,9 +232,9 @@ class DouyinCollector(BaseCollector):
             "topic": desc,
             "source": "douyin",
             "description": desc,
-            "likes": _safe_int(statistics.get("digg_count", 0)),
-            "shares": _safe_int(statistics.get("share_count", 0)),
-            "play_count": _safe_int(statistics.get("play_count", 0)),
+            "likes": safe_int(statistics.get("digg_count", 0)),
+            "shares": safe_int(statistics.get("share_count", 0)),
+            "play_count": safe_int(statistics.get("play_count", 0)),
             "author": author.get("nickname", "") or "",
             "url": url,
         }

@@ -15,7 +15,10 @@
 #   - 支持多平台: 淘宝 (taobao) / 拼多多 (pinduoduo)
 #   - 各平台 base_url 独立配置 (构造器 / 环境变量)
 #   - 采集热销商品 (含价格/销量/品类), 作为已验证商业信号
-#   - 优雅降级: HTTP 错误 / API 错误码 / 空响应 / 畸形数据均返回空列表
+#   - 异常分级: HTTP 错误 / API 错误码 / JSON 解析失败均向上抛出
+#     (由 BaseCollector 的重试 / 熔断 / 缓存机制处理);
+#     仅 API 成功 (code=0) 但数据列表为空时返回 []
+#   - 未知平台抛 ValueError (不再静默兜底)
 # ==============================================================================
 
 """
@@ -41,49 +44,18 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-try:
-    from loguru import logger
-except ImportError:  # pragma: no cover
-    import logging
-
-    logger = logging.getLogger(__name__)  # type: ignore[assignment]
-
 from trendpulse.collectors.base import BaseCollector
+from trendpulse.collectors.utils import safe_float, safe_int, setup_logger
 
-
-# ==============================================================================
-# 辅助函数 - 安全类型转换
-# ==============================================================================
-
-
-def _safe_int(value: Any, default: int = 0) -> int:
-    """安全转换为 int, 失败时返回 default。"""
-    try:
-        if value is None or value == "":
-            return default
-        return int(value)
-    except (ValueError, TypeError):
-        return default
-
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    """安全转换为 float, 失败时返回 default。"""
-    try:
-        if value is None or value == "":
-            return default
-        return float(value)
-    except (ValueError, TypeError):
-        return default
+logger = setup_logger(__name__)
 
 
 # ==============================================================================
 # 支持的平台配置
 # ==============================================================================
 
-_PLATFORM_URL_ENV: Dict[str, str] = {
-    "taobao": "TAOBAO_API_URL",
-    "pinduoduo": "PDD_API_URL",
-}
+# 已知平台集合 (用于 _get_platform_base_url 校验)
+_KNOWN_PLATFORMS = frozenset({"taobao", "pinduoduo"})
 
 _PLATFORM_DEFAULT_URL: Dict[str, str] = {
     "taobao": "https://h5api.m.taobao.com",
@@ -119,6 +91,12 @@ class EcommerceCollector(BaseCollector):
     返回格式:
         [{"topic", "source", "product_name", "price", "sales",
           "platform", "url", "category"}, ...]
+
+    异常:
+        - _fetch 在 HTTP 失败 / 非 200 / JSON 解析失败 / API 业务错误码
+          (code != 0) 时向上抛出异常
+        - _get_platform_base_url 在 platform 不属于 {taobao, pinduoduo} 时
+          抛出 ValueError (不再静默兜底默认平台)
     """
 
     def __init__(
@@ -148,11 +126,19 @@ class EcommerceCollector(BaseCollector):
             platform : taobao | pinduoduo
 
         返回:
-            对应平台的 base_url; 未知平台返回淘宝 URL 作为兜底
+            对应平台的 base_url
+
+        异常:
+            ValueError: platform 不在已知平台集合中
         """
+        if platform == "taobao":
+            return self.taobao_url
         if platform == "pinduoduo":
             return self.pinduoduo_url
-        return self.taobao_url  # 默认淘宝
+        raise ValueError(
+            f"Unknown platform: {platform} "
+            f"(known platforms: {sorted(_KNOWN_PLATFORMS)})"
+        )
 
     # ==================================================================
     # _fetch - 主采集入口
@@ -168,6 +154,7 @@ class EcommerceCollector(BaseCollector):
         """执行电商热销榜采集。
 
         创建 httpx.AsyncClient 上下文, 委托给 _get_hotlist 执行实际请求与解析。
+        异常向上抛出 (不吞没), 由 BaseCollector 处理重试 / 熔断 / 缓存降级。
 
         参数:
             platform : 电商平台 (taobao | pinduoduo)
@@ -175,14 +162,19 @@ class EcommerceCollector(BaseCollector):
             limit    : 返回数量上限
 
         返回:
-            解析后的商品数据列表; 任何错误均返回空列表 (不抛异常)
+            解析后的商品数据列表; API 成功但 items 为空时返回 []
+
+        异常:
+            ValueError: 未知 platform
+            httpx.HTTPError / 网络异常 / 非 200 状态码 /
+            JSON 解析失败 / API 业务错误码 (code != 0) 均向上抛出
         """
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                return await self._get_hotlist(client, platform, category, limit)
-        except Exception as exc:
-            logger.warning(f"[ecommerce] _fetch 异常, 返回空列表: {exc}")
-            return []
+        # 未知平台在创建 client 前即抛出, 快速失败
+        # (调用 _get_platform_base_url 触发校验)
+        self._get_platform_base_url(platform)
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            return await self._get_hotlist(client, platform, category, limit)
 
     # ==================================================================
     # _get_hotlist - 获取热销榜
@@ -199,44 +191,47 @@ class EcommerceCollector(BaseCollector):
 
         参数:
             client   : httpx.AsyncClient 实例
-            platform : taobao | pinduoduo
+            platform : taobao | pinduoduo (调用方需保证已校验)
             category : 商品品类
             limit    : 返回数量上限
 
         返回:
-            解析后的商品数据列表; HTTP 错误 / API 错误码 / 空结果均返回空列表
+            解析后的商品数据列表; API 成功 (code=0) 但 items 为空时返回 []
+
+        异常:
+            - ValueError: 未知 platform
+            - httpx.HTTPError 等: 网络请求失败 (向上抛出, 触发重试)
+            - RuntimeError: HTTP 非 200 / JSON 解析失败 / API 业务错误码 (code != 0)
         """
         base_url = self._get_platform_base_url(platform)
         path = _PLATFORM_DEFAULT_PATH.get(platform, "/api/hot_list")
         url = f"{base_url}{path}"
         params = {"category": category, "count": limit}
 
-        try:
-            response = await client.get(url, params=params)
-        except Exception as exc:
-            logger.warning(f"[ecommerce:{platform}] 请求失败: {exc}")
-            return []
+        # HTTP 请求异常 (网络错误 / 超时) 直接向上抛出, 触发 BaseCollector 重试
+        response = await client.get(url, params=params)
 
         if response.status_code != 200:
-            logger.debug(f"[ecommerce:{platform}] HTTP {response.status_code}, 跳过")
-            return []
+            raise RuntimeError(
+                f"[ecommerce:{platform}] HTTP 请求失败, 状态码: {response.status_code}"
+            )
 
-        try:
-            data = response.json()
-        except Exception as exc:
-            logger.warning(f"[ecommerce:{platform}] JSON 解析失败: {exc}")
-            return []
+        # JSON 解析失败向上抛出 (若 .json() 抛 ValueError, 不再吞没)
+        data = response.json()
 
-        # 校验 API 业务码: code == 0 表示成功
+        # 校验 API 业务码: code == 0 表示成功, 否则视为业务失败 (向上抛出)
         if data.get("code", -1) != 0:
-            logger.debug(f"[ecommerce:{platform}] API 错误码: {data.get('code')}")
-            return []
+            raise RuntimeError(
+                f"[ecommerce:{platform}] API 业务错误码: code={data.get('code')}, "
+                f"msg={data.get('msg', '')}"
+            )
 
-        items: List[Dict[str, Any]] = (
-            data.get("data", {}).get("items", [])
-            if isinstance(data.get("data"), dict)
-            else []
-        )
+        # API 成功: 提取 items 列表 (防御性处理 data["data"] 结构缺失)
+        raw_data = data.get("data")
+        if not isinstance(raw_data, dict):
+            # code=0 但 data 结构异常, 视为 API 契约违反, 返回空列表
+            return []
+        items: List[Dict[str, Any]] = raw_data.get("items", [])
         return [self._parse_product(item, platform) for item in items]
 
     # ==================================================================
@@ -257,7 +252,7 @@ class EcommerceCollector(BaseCollector):
 
         返回:
             {topic, source, product_name, price, sales, platform, url, category}
-            缺失字段返回默认值 (空字符串 / 0), 不抛异常
+            缺失字段返回默认值 (空字符串 / 0), 不抛异常 (解析层保持防御性)
         """
         item_id: str = raw_product.get("item_id", "")
         url: str = (
@@ -270,8 +265,8 @@ class EcommerceCollector(BaseCollector):
             "topic": title,
             "source": "ecommerce",
             "product_name": title,
-            "price": _safe_float(raw_product.get("price", 0)),
-            "sales": _safe_int(raw_product.get("sales", 0)),
+            "price": safe_float(raw_product.get("price", 0)),
+            "sales": safe_int(raw_product.get("sales", 0)),
             "platform": platform,
             "url": url,
             "category": raw_product.get("category", "") or "",

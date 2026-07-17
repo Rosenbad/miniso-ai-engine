@@ -15,7 +15,9 @@
 #   - 使用 httpx.AsyncClient 异步 HTTP 请求, 默认 10s 超时
 #   - base_url 可通过构造器 / 环境变量配置 (测试灵活性)
 #   - 真实 API 需鉴权, 本实现聚焦解析逻辑正确性与可测试性
-#   - 优雅降级: HTTP 错误 / API 错误码 / 空响应 / 畸形数据均返回空列表
+#   - 异常分级: HTTP 错误 / API 错误码 / JSON 解析失败均向上抛出
+#     (由 BaseCollector 的重试 / 熔断 / 缓存机制处理);
+#     仅 API 成功 (code=0) 但数据列表为空时返回 []
 # ==============================================================================
 
 """
@@ -40,32 +42,10 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-try:
-    from loguru import logger
-except ImportError:  # pragma: no cover
-    import logging
-
-    logger = logging.getLogger(__name__)  # type: ignore[assignment]
-
 from trendpulse.collectors.base import BaseCollector
+from trendpulse.collectors.utils import safe_int, setup_logger
 
-
-# ==============================================================================
-# 辅助函数 - 安全类型转换
-# ==============================================================================
-
-
-def _safe_int(value: Any, default: int = 0) -> int:
-    """安全转换为 int, 失败时返回 default。
-
-    处理 None / 空字符串 / 非数字字符串等异常输入。
-    """
-    try:
-        if value is None or value == "":
-            return default
-        return int(value)
-    except (ValueError, TypeError):
-        return default
+logger = setup_logger(__name__)
 
 
 # ==============================================================================
@@ -88,6 +68,11 @@ class XiaohongshuCollector(BaseCollector):
 
     返回格式:
         [{"topic", "source", "content", "likes", "comments", "author", "url"}, ...]
+
+    异常:
+        _fetch 在 HTTP 失败 / 非 200 / JSON 解析失败 / API 业务错误码 (code != 0)
+        时向上抛出异常, 由 BaseCollector 的重试 / 熔断 / 缓存机制处理;
+        仅当 API 成功 (code=0) 但 items 列表为空时返回 []。
     """
 
     def __init__(
@@ -116,20 +101,21 @@ class XiaohongshuCollector(BaseCollector):
         """执行小红书笔记搜索采集。
 
         创建 httpx.AsyncClient 上下文, 委托给 _search_notes 执行实际请求与解析。
+        异常向上抛出 (不吞没), 由 BaseCollector 处理重试 / 熔断 / 缓存降级。
 
         参数:
             keyword : 搜索关键词
             limit   : 返回数量上限
 
         返回:
-            解析后的笔记数据列表; 任何错误均返回空列表 (不抛异常)
+            解析后的笔记数据列表; API 成功但 items 为空时返回 []
+
+        异常:
+            httpx.HTTPError / 网络异常 / 非 200 状态码 /
+            JSON 解析失败 / API 业务错误码 (code != 0) 均向上抛出
         """
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                return await self._search_notes(client, keyword, limit)
-        except Exception as exc:
-            logger.warning(f"[xiaohongshu] _fetch 异常, 返回空列表: {exc}")
-            return []
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            return await self._search_notes(client, keyword, limit)
 
     # ==================================================================
     # _search_notes - 搜索笔记 (实际 HTTP 请求 + 解析)
@@ -149,37 +135,39 @@ class XiaohongshuCollector(BaseCollector):
             limit   : 返回数量上限
 
         返回:
-            解析后的笔记数据列表; HTTP 错误 / API 错误码 / 空结果均返回空列表
+            解析后的笔记数据列表; API 成功 (code=0) 但 items 为空时返回 []
+
+        异常:
+            - httpx.HTTPError 等: 网络请求失败 (向上抛出, 触发重试)
+            - RuntimeError: HTTP 非 200 / JSON 解析失败 / API 业务错误码 (code != 0)
         """
         url = f"{self.base_url}/api/sns/web/v1/search/notes"
         params = {"keyword": keyword, "page": 1, "page_size": limit}
 
-        try:
-            response = await client.get(url, params=params)
-        except Exception as exc:
-            logger.warning(f"[xiaohongshu] 请求失败: {exc}")
-            return []
+        # HTTP 请求异常 (网络错误 / 超时) 直接向上抛出, 触发 BaseCollector 重试
+        response = await client.get(url, params=params)
 
         if response.status_code != 200:
-            logger.debug(
-                f"[xiaohongshu] HTTP {response.status_code}, 跳过"
+            raise RuntimeError(
+                f"[xiaohongshu] HTTP 请求失败, 状态码: {response.status_code}"
             )
-            return []
 
-        try:
-            data = response.json()
-        except Exception as exc:
-            logger.warning(f"[xiaohongshu] JSON 解析失败: {exc}")
-            return []
+        # JSON 解析失败向上抛出 (若 .json() 抛 ValueError, 不再吞没)
+        data = response.json()
 
-        # 校验 API 业务码: code == 0 表示成功
+        # 校验 API 业务码: code == 0 表示成功, 否则视为业务失败 (向上抛出)
         if data.get("code", -1) != 0:
-            logger.debug(f"[xiaohongshu] API 错误码: {data.get('code')}")
-            return []
+            raise RuntimeError(
+                f"[xiaohongshu] API 业务错误码: code={data.get('code')}, "
+                f"msg={data.get('msg', '')}"
+            )
 
-        items: List[Dict[str, Any]] = (
-            data.get("data", {}).get("items", []) if isinstance(data.get("data"), dict) else []
-        )
+        # API 成功: 提取 items 列表 (防御性处理 data["data"] 结构缺失)
+        raw_data = data.get("data")
+        if not isinstance(raw_data, dict):
+            # code=0 但 data 结构异常, 视为 API 契约违反, 返回空列表
+            return []
+        items: List[Dict[str, Any]] = raw_data.get("items", [])
         return [self._parse_note(item) for item in items]
 
     # ==================================================================
@@ -198,7 +186,7 @@ class XiaohongshuCollector(BaseCollector):
 
         返回:
             {topic, source, content, likes, comments, author, url}
-            缺失字段返回默认值 (空字符串 / 0), 不抛异常
+            缺失字段返回默认值 (空字符串 / 0), 不抛异常 (解析层保持防御性)
         """
         # 兼容嵌套 note_card 与扁平结构
         note_card: Dict[str, Any] = raw_note.get("note_card", raw_note)
@@ -218,8 +206,8 @@ class XiaohongshuCollector(BaseCollector):
             "topic": note_card.get("title", "") or "",
             "source": "xiaohongshu",
             "content": note_card.get("desc", "") or "",
-            "likes": _safe_int(interact_info.get("liked_count", 0)),
-            "comments": _safe_int(interact_info.get("comment_count", 0)),
+            "likes": safe_int(interact_info.get("liked_count", 0)),
+            "comments": safe_int(interact_info.get("comment_count", 0)),
             "author": user.get("nickname", "") or "",
             "url": url,
         }

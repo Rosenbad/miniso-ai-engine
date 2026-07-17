@@ -30,13 +30,15 @@ from __future__ import annotations
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 
-from trendpulse.collectors.base import BaseCollector
+from trendpulse.collectors.base import BaseCollector, CircuitBreakerOpenError, CircuitState
 from trendpulse.collectors.xiaohongshu import XiaohongshuCollector
 from trendpulse.collectors.douyin import DouyinCollector
 from trendpulse.collectors.ecommerce import EcommerceCollector
 from trendpulse.collectors.search_index import SearchIndexCollector
+from trendpulse.collectors.utils import safe_float, safe_int, setup_logger
 
 
 # ==============================================================================
@@ -218,8 +220,8 @@ class TestXiaohongshuCollector:
         assert result[1]["topic"] == "多巴胺穿搭"
         assert result[1]["author"] == "达人B"
 
-    async def test_fetch_http_error_returns_empty(self, mocker: Any) -> None:
-        """HTTP 非 200 状态码应返回空列表, 不抛异常。"""
+    async def test_fetch_http_error_raises(self, mocker: Any) -> None:
+        """HTTP 非 200 状态码应抛出 RuntimeError (不返回空列表), 由 BaseCollector 重试。"""
         mock_response = _make_mock_response({}, status_code=500)
         mock_client = _make_mock_client(mock_response, mocker)
         mocker.patch(
@@ -228,12 +230,11 @@ class TestXiaohongshuCollector:
         )
         collector = XiaohongshuCollector()
 
-        result = await collector._fetch(keyword="test")
+        with pytest.raises(RuntimeError, match="HTTP 请求失败"):
+            await collector._fetch(keyword="test")
 
-        assert result == []
-
-    async def test_fetch_api_error_code_returns_empty(self, mocker: Any) -> None:
-        """API 返回错误码 (code != 0) 应返回空列表。"""
+    async def test_fetch_api_error_code_raises(self, mocker: Any) -> None:
+        """API 返回错误码 (code != 0) 应抛出 RuntimeError, 不再吞没返回 []。"""
         api_response = {"code": 1001, "msg": "参数错误", "data": {}}
         mock_response = _make_mock_response(api_response)
         mock_client = _make_mock_client(mock_response, mocker)
@@ -243,12 +244,11 @@ class TestXiaohongshuCollector:
         )
         collector = XiaohongshuCollector()
 
-        result = await collector._fetch(keyword="test")
-
-        assert result == []
+        with pytest.raises(RuntimeError, match="API 业务错误码"):
+            await collector._fetch(keyword="test")
 
     async def test_fetch_empty_items_returns_empty(self, mocker: Any) -> None:
-        """API 返回空 items 列表时应返回空列表。"""
+        """API 返回成功 (code=0) 但 items 列表为空时应返回空列表 (合法空结果)。"""
         api_response = {"code": 0, "data": {"items": []}}
         mock_response = _make_mock_response(api_response)
         mock_client = _make_mock_client(mock_response, mocker)
@@ -262,8 +262,8 @@ class TestXiaohongshuCollector:
 
         assert result == []
 
-    async def test_fetch_malformed_response_returns_empty(self, mocker: Any) -> None:
-        """畸形响应 (缺少 data 字段) 应返回空列表, 不抛异常。"""
+    async def test_fetch_malformed_response_raises(self, mocker: Any) -> None:
+        """畸形响应 (缺少 code 字段, code != 0) 应抛出 RuntimeError, 不再吞没。"""
         api_response = {"unexpected": "structure"}
         mock_response = _make_mock_response(api_response)
         mock_client = _make_mock_client(mock_response, mocker)
@@ -273,9 +273,38 @@ class TestXiaohongshuCollector:
         )
         collector = XiaohongshuCollector()
 
-        result = await collector._fetch(keyword="test")
+        with pytest.raises(RuntimeError, match="API 业务错误码"):
+            await collector._fetch(keyword="test")
 
-        assert result == []
+    async def test_fetch_json_parse_failure_raises(self, mocker: Any) -> None:
+        """response.json() 抛 ValueError 时应向上抛出, 不再吞没返回 [] (I6)。"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.side_effect = ValueError("invalid json")
+        mock_client = _make_mock_client(mock_response, mocker)
+        mocker.patch(
+            "trendpulse.collectors.xiaohongshu.httpx.AsyncClient",
+            return_value=mock_client,
+        )
+        collector = XiaohongshuCollector()
+
+        with pytest.raises(ValueError, match="invalid json"):
+            await collector._fetch(keyword="test")
+
+    async def test_fetch_network_error_raises(self, mocker: Any) -> None:
+        """client.get 抛出网络异常时应向上抛出, 触发 BaseCollector 重试 (C1)。"""
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.__aexit__.return_value = None
+        mock_client.get = AsyncMock(side_effect=httpx.ConnectError("connection refused"))
+        mocker.patch(
+            "trendpulse.collectors.xiaohongshu.httpx.AsyncClient",
+            return_value=mock_client,
+        )
+        collector = XiaohongshuCollector()
+
+        with pytest.raises(httpx.ConnectError):
+            await collector._fetch(keyword="test")
 
     # --- _search_notes 辅助方法 (直接传入 mock client) ---
 
@@ -436,8 +465,8 @@ class TestDouyinCollector:
         assert result[0]["play_count"] == 10000
         assert result[1]["author"] == "达人B"
 
-    async def test_fetch_http_error_returns_empty(self, mocker: Any) -> None:
-        """HTTP 非 200 应返回空列表。"""
+    async def test_fetch_http_error_raises(self, mocker: Any) -> None:
+        """HTTP 非 200 应抛出 RuntimeError (C1)。"""
         mock_response = _make_mock_response({}, status_code=403)
         mock_client = _make_mock_client(mock_response, mocker)
         mocker.patch(
@@ -446,12 +475,11 @@ class TestDouyinCollector:
         )
         collector = DouyinCollector()
 
-        result = await collector._fetch(keyword="test")
+        with pytest.raises(RuntimeError, match="HTTP 请求失败"):
+            await collector._fetch(keyword="test")
 
-        assert result == []
-
-    async def test_fetch_api_error_returns_empty(self, mocker: Any) -> None:
-        """API 错误状态码应返回空列表。"""
+    async def test_fetch_api_error_raises(self, mocker: Any) -> None:
+        """API 错误状态码 (status_code != 0) 应抛出 RuntimeError (C1)。"""
         api_response = {"status_code": 1, "status_msg": "rate limited"}
         mock_response = _make_mock_response(api_response)
         mock_client = _make_mock_client(mock_response, mocker)
@@ -461,12 +489,11 @@ class TestDouyinCollector:
         )
         collector = DouyinCollector()
 
-        result = await collector._fetch(keyword="test")
-
-        assert result == []
+        with pytest.raises(RuntimeError, match="API 业务错误码"):
+            await collector._fetch(keyword="test")
 
     async def test_fetch_empty_list_returns_empty(self, mocker: Any) -> None:
-        """空 list 应返回空列表。"""
+        """API 成功 (status_code=0) 但 list 为空时应返回空列表 (合法空结果)。"""
         api_response = {"status_code": 0, "data": {"list": []}}
         mock_response = _make_mock_response(api_response)
         mock_client = _make_mock_client(mock_response, mocker)
@@ -480,8 +507,8 @@ class TestDouyinCollector:
 
         assert result == []
 
-    async def test_fetch_malformed_response_returns_empty(self, mocker: Any) -> None:
-        """畸形响应应返回空列表。"""
+    async def test_fetch_malformed_response_raises(self, mocker: Any) -> None:
+        """畸形响应 (缺少 status_code, 视为 != 0) 应抛出 RuntimeError (C1)。"""
         api_response = {"unexpected": True}
         mock_response = _make_mock_response(api_response)
         mock_client = _make_mock_client(mock_response, mocker)
@@ -491,14 +518,98 @@ class TestDouyinCollector:
         )
         collector = DouyinCollector()
 
-        result = await collector._fetch(keyword="test")
+        with pytest.raises(RuntimeError, match="API 业务错误码"):
+            await collector._fetch(keyword="test")
 
-        assert result == []
+    async def test_fetch_json_parse_failure_raises(self, mocker: Any) -> None:
+        """response.json() 抛 ValueError 时应向上抛出 (I6)。"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.side_effect = ValueError("invalid json")
+        mock_client = _make_mock_client(mock_response, mocker)
+        mocker.patch(
+            "trendpulse.collectors.douyin.httpx.AsyncClient",
+            return_value=mock_client,
+        )
+        collector = DouyinCollector()
+
+        with pytest.raises(ValueError, match="invalid json"):
+            await collector._fetch(keyword="test")
+
+    # --- keyword 路由 (I2: 关键词走搜索端点, 无关键词走热门榜) ---
+
+    async def test_fetch_with_keyword_uses_search_endpoint(self, mocker: Any) -> None:
+        """传入 keyword 时应调用搜索端点 (I2)。"""
+        api_response = {
+            "status_code": 0,
+            "data": {
+                "list": [
+                    {
+                        "aweme_id": "s1",
+                        "desc": "搜索结果",
+                        "statistics": {"digg_count": 100, "share_count": 5, "play_count": 1000},
+                        "author": {"nickname": "达人"},
+                        "share_url": "https://example.com/s1",
+                    }
+                ]
+            },
+        }
+        mock_response = _make_mock_response(api_response)
+        mock_client = _make_mock_client(mock_response, mocker)
+        mocker.patch(
+            "trendpulse.collectors.douyin.httpx.AsyncClient",
+            return_value=mock_client,
+        )
+        collector = DouyinCollector()
+
+        result = await collector._fetch(keyword="好物", limit=20)
+
+        # 验证调用搜索端点 (URL 含 /web/search/item/)
+        call_args = mock_client.get.call_args
+        assert "/web/search/item/" in call_args.args[0]
+        # 验证 params 含 keyword
+        assert call_args.kwargs.get("params", {}).get("keyword") == "好物"
+        assert len(result) == 1
+        assert result[0]["topic"] == "搜索结果"
+
+    async def test_fetch_without_keyword_uses_trending_endpoint(self, mocker: Any) -> None:
+        """未传 keyword 时应调用热门榜端点 (I2)。"""
+        api_response = {
+            "status_code": 0,
+            "data": {
+                "list": [
+                    {
+                        "aweme_id": "t1",
+                        "desc": "热门视频",
+                        "statistics": {"digg_count": 500, "share_count": 10, "play_count": 5000},
+                        "author": {"nickname": "热门达人"},
+                        "share_url": "https://example.com/t1",
+                    }
+                ]
+            },
+        }
+        mock_response = _make_mock_response(api_response)
+        mock_client = _make_mock_client(mock_response, mocker)
+        mocker.patch(
+            "trendpulse.collectors.douyin.httpx.AsyncClient",
+            return_value=mock_client,
+        )
+        collector = DouyinCollector()
+
+        result = await collector._fetch(keyword="", limit=10)
+
+        # 验证调用热门榜端点 (URL 含 /web/hot/search/list)
+        call_args = mock_client.get.call_args
+        assert "/web/hot/search/list" in call_args.args[0]
+        # 验证 params 不含 keyword
+        assert "keyword" not in call_args.kwargs.get("params", {})
+        assert len(result) == 1
+        assert result[0]["topic"] == "热门视频"
 
     # --- _get_trending 辅助方法 ---
 
     async def test_get_trending_calls_get(self, mocker: Any) -> None:
-        """_get_trending 应调用 client.get。"""
+        """_get_trending 应调用 client.get (未传 keyword 走热门榜端点)。"""
         api_response = {
             "status_code": 0,
             "data": {
@@ -518,11 +629,41 @@ class TestDouyinCollector:
         mock_client.get = AsyncMock(return_value=mock_response)
 
         collector = DouyinCollector()
-        result = await collector._get_trending(mock_client, limit=10)
+        result = await collector._get_trending(mock_client, keyword="", limit=10)
 
         mock_client.get.assert_awaited_once()
         assert len(result) == 1
         assert result[0]["topic"] == "热门视频"
+
+    async def test_get_trending_with_keyword_calls_search(self, mocker: Any) -> None:
+        """_get_trending 传入 keyword 时应调用搜索端点 (I2)。"""
+        api_response = {
+            "status_code": 0,
+            "data": {
+                "list": [
+                    {
+                        "aweme_id": "s1",
+                        "desc": "搜索结果",
+                        "statistics": {"digg_count": 100, "share_count": 5, "play_count": 1000},
+                        "author": {"nickname": "达人"},
+                        "share_url": "https://example.com/s1",
+                    }
+                ]
+            },
+        }
+        mock_response = _make_mock_response(api_response)
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        collector = DouyinCollector()
+        result = await collector._get_trending(mock_client, keyword="好物", limit=10)
+
+        mock_client.get.assert_awaited_once()
+        call_args = mock_client.get.call_args
+        assert "/web/search/item/" in call_args.args[0]
+        assert call_args.kwargs.get("params", {}).get("keyword") == "好物"
+        assert len(result) == 1
+        assert result[0]["topic"] == "搜索结果"
 
 
 # ==============================================================================
@@ -687,8 +828,8 @@ class TestEcommerceCollector:
         assert result[0]["platform"] == "pinduoduo"
         assert result[0]["price"] == 5.9
 
-    async def test_fetch_http_error_returns_empty(self, mocker: Any) -> None:
-        """HTTP 错误应返回空列表。"""
+    async def test_fetch_http_error_raises(self, mocker: Any) -> None:
+        """HTTP 错误应抛出 RuntimeError (C1)。"""
         mock_response = _make_mock_response({}, status_code=500)
         mock_client = _make_mock_client(mock_response, mocker)
         mocker.patch(
@@ -697,12 +838,11 @@ class TestEcommerceCollector:
         )
         collector = EcommerceCollector()
 
-        result = await collector._fetch(platform="taobao")
+        with pytest.raises(RuntimeError, match="HTTP 请求失败"):
+            await collector._fetch(platform="taobao")
 
-        assert result == []
-
-    async def test_fetch_api_error_returns_empty(self, mocker: Any) -> None:
-        """API 错误码应返回空列表。"""
+    async def test_fetch_api_error_raises(self, mocker: Any) -> None:
+        """API 错误码 (code != 0) 应抛出 RuntimeError (C1)。"""
         api_response = {"code": 500, "msg": "error"}
         mock_response = _make_mock_response(api_response)
         mock_client = _make_mock_client(mock_response, mocker)
@@ -712,12 +852,11 @@ class TestEcommerceCollector:
         )
         collector = EcommerceCollector()
 
-        result = await collector._fetch(platform="taobao")
-
-        assert result == []
+        with pytest.raises(RuntimeError, match="API 业务错误码"):
+            await collector._fetch(platform="taobao")
 
     async def test_fetch_empty_items_returns_empty(self, mocker: Any) -> None:
-        """空 items 应返回空列表。"""
+        """API 成功 (code=0) 但 items 为空时应返回空列表 (合法空结果)。"""
         api_response = {"code": 0, "data": {"items": []}}
         mock_response = _make_mock_response(api_response)
         mock_client = _make_mock_client(mock_response, mocker)
@@ -731,8 +870,8 @@ class TestEcommerceCollector:
 
         assert result == []
 
-    async def test_fetch_malformed_response_returns_empty(self, mocker: Any) -> None:
-        """畸形响应应返回空列表。"""
+    async def test_fetch_malformed_response_raises(self, mocker: Any) -> None:
+        """畸形响应 (缺少 code, 视为 != 0) 应抛出 RuntimeError (C1)。"""
         api_response = {"no_data": True}
         mock_response = _make_mock_response(api_response)
         mock_client = _make_mock_client(mock_response, mocker)
@@ -742,9 +881,51 @@ class TestEcommerceCollector:
         )
         collector = EcommerceCollector()
 
-        result = await collector._fetch(platform="taobao")
+        with pytest.raises(RuntimeError, match="API 业务错误码"):
+            await collector._fetch(platform="taobao")
 
-        assert result == []
+    async def test_fetch_json_parse_failure_raises(self, mocker: Any) -> None:
+        """response.json() 抛 ValueError 时应向上抛出 (I6)。"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.side_effect = ValueError("invalid json")
+        mock_client = _make_mock_client(mock_response, mocker)
+        mocker.patch(
+            "trendpulse.collectors.ecommerce.httpx.AsyncClient",
+            return_value=mock_client,
+        )
+        collector = EcommerceCollector()
+
+        with pytest.raises(ValueError, match="invalid json"):
+            await collector._fetch(platform="taobao")
+
+    # --- 未知平台校验 (I4) ---
+
+    async def test_fetch_unknown_platform_raises_value_error(self, mocker: Any) -> None:
+        """未知 platform 应抛出 ValueError (I4), 不再静默兜底默认平台。"""
+        mock_client = _make_mock_client(_make_mock_response({}), mocker)
+        mocker.patch(
+            "trendpulse.collectors.ecommerce.httpx.AsyncClient",
+            return_value=mock_client,
+        )
+        collector = EcommerceCollector()
+
+        with pytest.raises(ValueError, match="Unknown platform"):
+            await collector._fetch(platform="jd")
+
+    def test_get_platform_base_url_unknown_raises(self) -> None:
+        """_get_platform_base_url 未知平台应抛 ValueError (I4)。"""
+        collector = EcommerceCollector()
+        with pytest.raises(ValueError, match="Unknown platform"):
+            collector._get_platform_base_url("amazon")
+
+    def test_get_platform_base_url_known_returns_url(self) -> None:
+        """_get_platform_base_url 已知平台应返回对应 URL (I4 回归)。"""
+        collector = EcommerceCollector(
+            taobao_url="http://mock-tb", pinduoduo_url="http://mock-pdd"
+        )
+        assert collector._get_platform_base_url("taobao") == "http://mock-tb"
+        assert collector._get_platform_base_url("pinduoduo") == "http://mock-pdd"
 
     # --- _get_hotlist 辅助方法 ---
 
@@ -921,8 +1102,8 @@ class TestSearchIndexCollector:
         assert result[0]["platform"] == "weixin"
         assert result[0]["index_value"] == 888
 
-    async def test_fetch_http_error_returns_empty(self, mocker: Any) -> None:
-        """HTTP 错误应返回空列表。"""
+    async def test_fetch_http_error_raises(self, mocker: Any) -> None:
+        """HTTP 错误应抛出 RuntimeError (C1)。"""
         mock_response = _make_mock_response({}, status_code=502)
         mock_client = _make_mock_client(mock_response, mocker)
         mocker.patch(
@@ -931,12 +1112,11 @@ class TestSearchIndexCollector:
         )
         collector = SearchIndexCollector()
 
-        result = await collector._fetch(keyword="test", platform="baidu")
+        with pytest.raises(RuntimeError, match="HTTP 请求失败"):
+            await collector._fetch(keyword="test", platform="baidu")
 
-        assert result == []
-
-    async def test_fetch_api_error_returns_empty(self, mocker: Any) -> None:
-        """API 错误码应返回空列表。"""
+    async def test_fetch_api_error_raises(self, mocker: Any) -> None:
+        """API 错误码 (code != 0) 应抛出 RuntimeError (C1)。"""
         api_response = {"code": 1, "msg": "invalid"}
         mock_response = _make_mock_response(api_response)
         mock_client = _make_mock_client(mock_response, mocker)
@@ -946,12 +1126,11 @@ class TestSearchIndexCollector:
         )
         collector = SearchIndexCollector()
 
-        result = await collector._fetch(keyword="test", platform="baidu")
-
-        assert result == []
+        with pytest.raises(RuntimeError, match="API 业务错误码"):
+            await collector._fetch(keyword="test", platform="baidu")
 
     async def test_fetch_empty_list_returns_empty(self, mocker: Any) -> None:
-        """空 index_list 应返回空列表。"""
+        """API 成功 (code=0) 但 index_list 为空时应返回空列表 (合法空结果)。"""
         api_response = {"code": 0, "data": {"keyword": "test", "index_list": []}}
         mock_response = _make_mock_response(api_response)
         mock_client = _make_mock_client(mock_response, mocker)
@@ -965,8 +1144,8 @@ class TestSearchIndexCollector:
 
         assert result == []
 
-    async def test_fetch_malformed_response_returns_empty(self, mocker: Any) -> None:
-        """畸形响应应返回空列表。"""
+    async def test_fetch_malformed_response_raises(self, mocker: Any) -> None:
+        """畸形响应 (缺少 code, 视为 != 0) 应抛出 RuntimeError (C1)。"""
         api_response = {"broken": True}
         mock_response = _make_mock_response(api_response)
         mock_client = _make_mock_client(mock_response, mocker)
@@ -976,9 +1155,51 @@ class TestSearchIndexCollector:
         )
         collector = SearchIndexCollector()
 
-        result = await collector._fetch(keyword="test", platform="baidu")
+        with pytest.raises(RuntimeError, match="API 业务错误码"):
+            await collector._fetch(keyword="test", platform="baidu")
 
-        assert result == []
+    async def test_fetch_json_parse_failure_raises(self, mocker: Any) -> None:
+        """response.json() 抛 ValueError 时应向上抛出 (I6)。"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.side_effect = ValueError("invalid json")
+        mock_client = _make_mock_client(mock_response, mocker)
+        mocker.patch(
+            "trendpulse.collectors.search_index.httpx.AsyncClient",
+            return_value=mock_client,
+        )
+        collector = SearchIndexCollector()
+
+        with pytest.raises(ValueError, match="invalid json"):
+            await collector._fetch(keyword="test", platform="baidu")
+
+    # --- 未知平台校验 (I4) ---
+
+    async def test_fetch_unknown_platform_raises_value_error(self, mocker: Any) -> None:
+        """未知 platform 应抛出 ValueError (I4), 不再静默兜底默认平台。"""
+        mock_client = _make_mock_client(_make_mock_response({}), mocker)
+        mocker.patch(
+            "trendpulse.collectors.search_index.httpx.AsyncClient",
+            return_value=mock_client,
+        )
+        collector = SearchIndexCollector()
+
+        with pytest.raises(ValueError, match="Unknown platform"):
+            await collector._fetch(keyword="test", platform="google")
+
+    def test_get_platform_base_url_unknown_raises(self) -> None:
+        """_get_platform_base_url 未知平台应抛 ValueError (I4)。"""
+        collector = SearchIndexCollector()
+        with pytest.raises(ValueError, match="Unknown platform"):
+            collector._get_platform_base_url("zhihu")
+
+    def test_get_platform_base_url_known_returns_url(self) -> None:
+        """_get_platform_base_url 已知平台应返回对应 URL (I4 回归)。"""
+        collector = SearchIndexCollector(
+            baidu_url="http://mock-bd", weixin_url="http://mock-wx"
+        )
+        assert collector._get_platform_base_url("baidu") == "http://mock-bd"
+        assert collector._get_platform_base_url("weixin") == "http://mock-wx"
 
     # --- _get_index 辅助方法 ---
 
@@ -1074,3 +1295,310 @@ class TestCollectorConsistency:
         assert DouyinCollector()._parse_video({})["source"] == "douyin"
         assert EcommerceCollector()._parse_product({}, "taobao")["source"] == "ecommerce"
         assert SearchIndexCollector()._parse_index({}, "t", "baidu")["source"] == "search_index"
+
+
+# ==============================================================================
+# 6. collect() 集成测试 (C2) - 端到端验证熔断 / 缓存 / 重试联动
+# ==============================================================================
+
+
+class TestCollectIntegration:
+    """collect() 主流程集成测试 (C2)。
+
+    端到端验证 BaseCollector 的熔断 / 缓存 / 重试机制与具体采集器的联动:
+        1. _fetch 持续失败 → 重试 max_retries 次后熔断器 OPEN
+        2. _fetch 成功 → 结果被缓存, 第二次 collect 直接命中缓存
+        3. 熔断器 OPEN → collect 快速失败, 不调用 _fetch
+
+    使用 XiaohongshuCollector 作为代表, mock _fetch / _get_cached / _set_cached /
+    _check_rate_limit 隔离 Redis / 限流 / 真实 HTTP 依赖。
+    """
+
+    async def test_collect_failing_fetch_triggers_retries_and_opens_circuit(
+        self, mocker: Any
+    ) -> None:
+        """C2-1: collect() 持续失败时触发重试, 并最终使熔断器 OPEN。
+
+        场景:
+            - _fetch 每次抛 RuntimeError (模拟 HTTP 失败)
+            - max_retries=3 → 每次collect调用 _fetch 4 次 (1 初始 + 3 重试)
+            - 连续 3 次 collect 失败 → 熔断器 failure_threshold=3 → OPEN
+
+        验证:
+            - 前 3 次 collect 均抛 RuntimeError (重试耗尽)
+            - 第 4 次 collect 抛 CircuitBreakerOpenError (熔断器已 OPEN)
+            - _fetch 总调用次数 = 3 次 collect * 4 次/collect = 12 次
+        """
+        # 隔离限流 / 缓存 (返回 None 视为缓存未命中)
+        mocker.patch.object(
+            XiaohongshuCollector, "_check_rate_limit", new=mocker.AsyncMock()
+        )
+        mocker.patch.object(
+            XiaohongshuCollector, "_get_cached", new=mocker.AsyncMock(return_value=None)
+        )
+        mocker.patch.object(
+            XiaohongshuCollector, "_set_cached", new=mocker.AsyncMock()
+        )
+        # 跳过退避真实等待
+        mocker.patch(
+            "trendpulse.collectors.base.asyncio.sleep", new=mocker.AsyncMock()
+        )
+
+        collector = XiaohongshuCollector(max_retries=3)
+        fetch_mock = AsyncMock(side_effect=RuntimeError("network error"))
+        collector._fetch = fetch_mock
+
+        # 前 3 次 collect: 每次重试 3 次 (总 4 次 _fetch), 全部失败
+        for _ in range(3):
+            with pytest.raises(RuntimeError, match="network error"):
+                await collector.collect(keyword="test")
+
+        # 熔断器应已 OPEN
+        assert collector.circuit_breaker.state == CircuitState.OPEN
+
+        # 第 4 次 collect: 熔断器 OPEN, 快速失败, 不再调用 _fetch
+        with pytest.raises(CircuitBreakerOpenError):
+            await collector.collect(keyword="test")
+
+        # _fetch 总调用次数 = 3 次 collect * 4 次/collect = 12 次
+        # (第 4 次 collect 因熔断未调用 _fetch)
+        assert fetch_mock.await_count == 12
+
+    async def test_collect_successful_fetch_caches_result(
+        self, mocker: Any
+    ) -> None:
+        """C2-2: collect() 成功时结果被缓存, 第二次 collect 命中缓存。
+
+        场景:
+            - 第一次 collect: _get_cached 返回 None → 调用 _fetch → 成功 → 写缓存
+            - 第二次 collect: _get_cached 返回缓存数据 → 直接返回, 不调用 _fetch
+
+        验证:
+            - 第一次 collect 返回 _fetch 的数据, _set_cached 被调用
+            - 第二次 collect 返回缓存数据, _fetch 未被再次调用
+        """
+        mocker.patch.object(
+            XiaohongshuCollector, "_check_rate_limit", new=mocker.AsyncMock()
+        )
+        mocker.patch.object(
+            XiaohongshuCollector, "_set_cached", new=mocker.AsyncMock()
+        )
+
+        cached_data = [{"topic": "cached_note", "source": "xiaohongshu"}]
+        fresh_data = [{"topic": "fresh_note", "source": "xiaohongshu"}]
+
+        # 第一次: 缓存未命中; 第二次: 缓存命中
+        get_cached = mocker.patch.object(
+            XiaohongshuCollector,
+            "_get_cached",
+            new=mocker.AsyncMock(side_effect=[None, cached_data]),
+        )
+        collector = XiaohongshuCollector()
+        fetch_mock = AsyncMock(return_value=fresh_data)
+        collector._fetch = fetch_mock
+
+        # 第一次 collect: 缓存未命中, 调用 _fetch, 返回新鲜数据并写缓存
+        result1 = await collector.collect(keyword="test")
+        assert result1 == fresh_data
+        assert fetch_mock.await_count == 1
+
+        # 第二次 collect: 缓存命中, 直接返回缓存数据, 不调用 _fetch
+        result2 = await collector.collect(keyword="test")
+        assert result2 == cached_data
+        assert fetch_mock.await_count == 1  # 未增加
+
+        # _get_cached 被调用 2 次
+        assert get_cached.await_count == 2
+
+    async def test_collect_circuit_breaker_open_fails_fast(
+        self, mocker: Any
+    ) -> None:
+        """C2-3: 熔断器 OPEN 时 collect() 快速失败, 不调用 _fetch。
+
+        场景:
+            - 手动将熔断器置为 OPEN (连续 3 次 record_failure)
+            - collect() 应抛 CircuitBreakerOpenError, 且不调用 _fetch
+
+        验证:
+            - collect 抛 CircuitBreakerOpenError
+            - _fetch 未被调用 (快速失败)
+        """
+        collector = XiaohongshuCollector()
+        # 触发熔断 (failure_threshold 默认 3)
+        for _ in range(collector.circuit_breaker.failure_threshold):
+            await collector.circuit_breaker.record_failure()
+        assert collector.circuit_breaker.state == CircuitState.OPEN
+
+        fetch_mock = AsyncMock(return_value=[{"topic": "should_not_be_called"}])
+        collector._fetch = fetch_mock
+
+        with pytest.raises(CircuitBreakerOpenError):
+            await collector.collect(keyword="test")
+
+        # _fetch 不应被调用
+        fetch_mock.assert_not_called()
+
+    async def test_collect_circuit_breaker_open_returns_cached_fallback(
+        self, mocker: Any
+    ) -> None:
+        """C2 补充: 熔断器 OPEN 但有缓存时, collect() 返回缓存而非抛异常。"""
+        cached_data = [{"topic": "cached_fallback", "source": "xiaohongshu"}]
+        mocker.patch.object(
+            XiaohongshuCollector,
+            "_get_cached",
+            new=mocker.AsyncMock(return_value=cached_data),
+        )
+
+        collector = XiaohongshuCollector()
+        for _ in range(collector.circuit_breaker.failure_threshold):
+            await collector.circuit_breaker.record_failure()
+        assert collector.circuit_breaker.state == CircuitState.OPEN
+
+        fetch_mock = AsyncMock()
+        collector._fetch = fetch_mock
+
+        result = await collector.collect(keyword="test")
+        assert result == cached_data
+        fetch_mock.assert_not_called()
+
+    async def test_collect_failed_fetch_returns_cached_fallback(
+        self, mocker: Any
+    ) -> None:
+        """C2 补充: _fetch 重试耗尽后, 若有缓存则返回缓存降级数据。"""
+        mocker.patch.object(
+            XiaohongshuCollector, "_check_rate_limit", new=mocker.AsyncMock()
+        )
+        mocker.patch.object(
+            XiaohongshuCollector, "_set_cached", new=mocker.AsyncMock()
+        )
+        mocker.patch(
+            "trendpulse.collectors.base.asyncio.sleep", new=mocker.AsyncMock()
+        )
+
+        cached_data = [{"topic": "stale_cache", "source": "xiaohongshu"}]
+        # 第一次 _get_cached (缓存检查) 返回 None, 第二次 (失败回退) 返回缓存
+        mocker.patch.object(
+            XiaohongshuCollector,
+            "_get_cached",
+            new=mocker.AsyncMock(side_effect=[None, cached_data]),
+        )
+
+        collector = XiaohongshuCollector(max_retries=2)
+        collector._fetch = AsyncMock(side_effect=RuntimeError("network down"))
+
+        result = await collector.collect(keyword="test")
+        assert result == cached_data
+
+
+# ==============================================================================
+# 7. 公共工具 utils.py 测试 (I1)
+# ==============================================================================
+
+
+class TestUtils:
+    """utils.py 公共工具函数测试 (I1)。
+
+    验证抽取出的 safe_int / safe_float / setup_logger 行为正确,
+    确保各采集器导入使用后不丢失原有功能。
+    """
+
+    # --- safe_int ---
+
+    def test_safe_int_normal(self) -> None:
+        """正常 int / 字符串应正确转换。"""
+        assert safe_int(100) == 100
+        assert safe_int("100") == 100
+
+    def test_safe_int_none(self) -> None:
+        """None 应返回 default。"""
+        assert safe_int(None) == 0
+        assert safe_int(None, default=-1) == -1
+
+    def test_safe_int_empty_string(self) -> None:
+        """空字符串应返回 default。"""
+        assert safe_int("") == 0
+        assert safe_int("", default=5) == 5
+
+    def test_safe_int_invalid_string(self) -> None:
+        """非数字字符串应返回 default。"""
+        assert safe_int("abc") == 0
+        assert safe_int("abc", default=-1) == -1
+
+    def test_safe_int_float_string(self) -> None:
+        """浮点字符串 int() 会抛 ValueError, 应返回 default (保持原 _safe_int 语义)。"""
+        # int("29.9") 抛 ValueError → 返回 default
+        assert safe_int("29.9") == 0
+        assert safe_int("29.9", default=-1) == -1
+        # 但 float 类型值会被 int() 截断
+        assert safe_int(29.9) == 29
+
+    # --- safe_float ---
+
+    def test_safe_float_normal(self) -> None:
+        """正常 float / 字符串应正确转换。"""
+        assert safe_float(29.9) == 29.9
+        assert safe_float("29.9") == 29.9
+
+    def test_safe_float_none(self) -> None:
+        """None 应返回 default。"""
+        assert safe_float(None) == 0.0
+        assert safe_float(None, default=-1.0) == -1.0
+
+    def test_safe_float_empty_string(self) -> None:
+        """空字符串应返回 default。"""
+        assert safe_float("") == 0.0
+        assert safe_float("", default=1.5) == 1.5
+
+    def test_safe_float_invalid_string(self) -> None:
+        """非数字字符串应返回 default。"""
+        assert safe_float("abc") == 0.0
+        assert safe_float("abc", default=-1.0) == -1.0
+
+    # --- setup_logger ---
+
+    def test_setup_logger_returns_logger(self) -> None:
+        """setup_logger 应返回一个可用的日志器对象。"""
+        log = setup_logger("test_module")
+        # 应该有 debug / info / warning / error 等日志方法
+        assert hasattr(log, "info")
+        assert hasattr(log, "warning")
+        assert hasattr(log, "error")
+
+    def test_setup_logger_same_name_returns_logger(self) -> None:
+        """setup_logger 多次调用应返回可用的日志器。"""
+        log1 = setup_logger("module_a")
+        log2 = setup_logger("module_b")
+        # 两者都应可用 (loguru 是单例, 标准logging按name区分)
+        assert log1 is not None
+        assert log2 is not None
+
+    # --- 各采集器使用 utils 的回归测试 ---
+
+    def test_collectors_use_shared_safe_int(self) -> None:
+        """4 个采集器的 _parse_* 方法应使用共享 safe_int (I1 回归)。"""
+        # 小红书: likes / comments
+        xhs = XiaohongshuCollector()
+        note = xhs._parse_note({"note_card": {"interact_info": {"liked_count": "100"}}})
+        assert note["likes"] == 100
+
+        # 抖音: likes / shares / play_count
+        dy = DouyinCollector()
+        video = dy._parse_video({"statistics": {"digg_count": "500", "play_count": "8000"}})
+        assert video["likes"] == 500
+        assert video["play_count"] == 8000
+
+        # 电商: sales (safe_int)
+        ec = EcommerceCollector()
+        product = ec._parse_product({"sales": "5000"}, "taobao")
+        assert product["sales"] == 5000
+
+        # 搜索指数: index_value
+        si = SearchIndexCollector()
+        index = si._parse_index({"index": "999"}, "kw", "baidu")
+        assert index["index_value"] == 999
+
+    def test_ecommerce_uses_shared_safe_float(self) -> None:
+        """EcommerceCollector._parse_product 应使用共享 safe_float (I1 回归)。"""
+        ec = EcommerceCollector()
+        product = ec._parse_product({"price": "29.9"}, "taobao")
+        assert product["price"] == 29.9
