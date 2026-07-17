@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     git \
     libpq-dev \
+    fonts-unifont \
     && rm -rf /var/lib/apt/lists/*
 
 # 设置工作目录
@@ -31,7 +32,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 安装 Playwright 浏览器（用于数据采集）
-RUN playwright install --with-deps chromium
+# 先安装系统依赖（跳过已安装的字体包），再安装浏览器
+RUN playwright install-deps chromium || true && \
+    playwright install chromium
 
 # 复制项目代码
 COPY . .
