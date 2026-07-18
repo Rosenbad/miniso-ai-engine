@@ -233,16 +233,20 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // ---- 模型校准 (反哺链路修复) ----
   runCalibration: async () => {
-    const { analysis, testPlan } = get();
+    const { analysis, testPlan, selectedIdea } = get();
     set({ calibrating: true, errorCalibration: null });
     try {
-      // 用预测的 rankings 与实际分析结果构造校准输入
+      // predictedHits: 模型预测的爆品概率 (来自 IdeaForge 的 hitScore)
+      // actualResults: 实际模拟验证的综合评分 (来自 MarketProbe 的 analysis.rankings)
       const predictedHits: Record<string, number> = {};
       const actualResults: Record<string, number> = {};
       if (analysis?.rankings) {
         for (const r of analysis.rankings) {
-          predictedHits[r.combination_id] = r.score;
+          // 实际结果: 使用模拟验证的综合评分
           actualResults[r.combination_id] = r.score;
+          // 预测值: 使用选中创意卡的 hitScore 作为模型预测基线
+          // (所有组合均源自同一产品创意, hitScore 代表模型对该创意的爆品预测概率)
+          predictedHits[r.combination_id] = selectedIdea?.hitScore ?? r.score;
         }
       }
       const calibration = await calibrateModel(

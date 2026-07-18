@@ -36,7 +36,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from shared.models import TrendSignal
-from ideaforge.funnel import FunnelFilter, HIT_SCORE_THRESHOLD, TOP_N
+from ideaforge.funnel import FunnelFilter, TOP_N
 from ideaforge.orchestrator import AgentOrchestrator
 from trendpulse.collectors.utils import setup_logger
 
@@ -235,13 +235,17 @@ async def get_funnel_status() -> Dict[str, Any]:
         FunnelStage(
             level="Top100",
             count=100,
-            description=f"FunnelFilter 过滤 hitScore > {HIT_SCORE_THRESHOLD}",
+            description=f"FunnelFilter 动态阈值过滤 (P70 分位数)",
         ),
     ]
 
+    # 使用 FunnelFilter 实例的动态阈值
+    funnel = _get_funnel()
+    current_threshold = funnel.HIT_SCORE_THRESHOLD
+
     response = FunnelResponse(
         stages=stages,
-        threshold=HIT_SCORE_THRESHOLD,
+        threshold=current_threshold,
         topN=TOP_N,
     )
 

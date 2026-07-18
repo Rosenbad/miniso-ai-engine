@@ -18,6 +18,7 @@ import { SERVICE_URLS } from "@/lib/api";
 import TrendRadar from "@/components/TrendRadar";
 import IdeaWorkbench from "@/components/IdeaWorkbench";
 import ValidationPanel from "@/components/ValidationPanel";
+import { ServiceHealthBadge } from "@/components/ServiceHealthBadge";
 
 export default function Home() {
   return (
@@ -39,9 +40,9 @@ export default function Home() {
             </div>
           </div>
           <div className="flex items-center gap-4 text-xs">
-            <ServiceBadge name="TrendPulse" port="8001" />
-            <ServiceBadge name="IdeaForge" port="8002" />
-            <ServiceBadge name="MarketProbe" port="8003" />
+            <ServiceHealthBadge name="TrendPulse" url={SERVICE_URLS.trendpulse} />
+            <ServiceHealthBadge name="IdeaForge" url={SERVICE_URLS.ideaforge} />
+            <ServiceHealthBadge name="MarketProbe" url={SERVICE_URLS.marketprobe} />
           </div>
         </div>
       </header>
@@ -90,16 +91,5 @@ export default function Home() {
 }
 
 // ------------------------------------------------------------------------------
-// 子组件
+// 子组件 (ServiceBadge 已迁移为独立的 ServiceHealthBadge 组件)
 // ------------------------------------------------------------------------------
-
-/** 服务状态徽章 */
-function ServiceBadge({ name, port }: { name: string; port: string }) {
-  return (
-    <div className="flex items-center gap-1.5">
-      <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-      <span className="text-gray-600">{name}</span>
-      <span className="text-gray-400 font-mono">:{port}</span>
-    </div>
-  );
-}

@@ -40,9 +40,9 @@ MarketProbe FastAPI 应用入口。
 from __future__ import annotations
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
 from marketprobe.routes import MarketProbeStore, router
+from shared.cors import setup_cors
 from trendpulse.collectors.utils import setup_logger
 
 logger = setup_logger(__name__)
@@ -73,14 +73,8 @@ def create_app() -> FastAPI:
         version="1.0.0",
     )
 
-    # CORS 中间件 — 允许前端跨域访问
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # CORS 中间件 — 从环境变量 CORS_ORIGINS 读取白名单 (安全修复 R1)
+    setup_cors(app)
 
     # 初始化内存状态存储 (供链式调用)
     app.state.marketprobe_store = MarketProbeStore()

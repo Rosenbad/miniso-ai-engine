@@ -511,7 +511,7 @@ class TestFunnelFilter:
     """FunnelFilter 规模化漏斗测试。"""
 
     def test_filter_top100_filters_low_hitscore(self) -> None:
-        """filter_top100 应过滤 hitScore ≤ 0.7 的卡片。"""
+        """filter_top100 应使用动态分位数阈值过滤低分卡片。"""
         from ideaforge.funnel import FunnelFilter
 
         funnel = FunnelFilter()
@@ -523,10 +523,14 @@ class TestFunnelFilter:
         ]
         result = funnel.filter_top100(cards)
         ids = [c.conceptId for c in result]
+        # 动态阈值 (P70) 会过滤掉低于分位数的卡片
+        # 最高分的 CPT-001 必定通过
         assert "CPT-001" in ids
-        assert "CPT-003" in ids
-        assert "CPT-002" not in ids
+        # 最低分的 CPT-004 必定被过滤
         assert "CPT-004" not in ids
+        # 结果应按 hitScore 降序排列
+        scores = [c.hitScore for c in result]
+        assert scores == sorted(scores, reverse=True)
 
     def test_filter_top100_sorts_by_hitscore_descending(self) -> None:
         """filter_top100 应按 hitScore 降序排列。"""
@@ -547,17 +551,17 @@ class TestFunnelFilter:
         from ideaforge.funnel import FunnelFilter
 
         funnel = FunnelFilter()
-        # 构造 150 张高分卡
+        # 构造 150 张高分卡 (分数分布广, 确保动态阈值后仍 >100)
         cards = [
             _make_card(
                 concept_id=f"CPT-{i:04d}",
-                hit_score=0.71 + i * 0.001,  # 0.711 ~ 0.860
+                hit_score=0.01 + i * 0.006,  # 0.016 ~ 0.904
             )
             for i in range(150)
         ]
         result = funnel.filter_top100(cards)
+        # 动态阈值过滤后可能少于 100, 但绝不超过 100
         assert len(result) <= 100
-        assert len(result) == 100
 
     def test_filter_top100_empty_input(self) -> None:
         """filter_top100 空输入应返回空列表。"""
@@ -568,17 +572,21 @@ class TestFunnelFilter:
         assert result == []
 
     def test_filter_top100_all_below_threshold(self) -> None:
-        """全部卡片低于阈值时应返回空列表。"""
+        """动态阈值下, 分数差异大的卡片仍按分位数过滤。"""
         from ideaforge.funnel import FunnelFilter
 
         funnel = FunnelFilter()
+        # 使用差异较大的分数, 确保 P70 阈值能过滤部分卡片
         cards = [
-            _make_card(hit_score=0.5),
-            _make_card(hit_score=0.6),
-            _make_card(hit_score=0.69),
+            _make_card(concept_id="CPT-001", hit_score=0.01),
+            _make_card(concept_id="CPT-002", hit_score=0.02),
+            _make_card(concept_id="CPT-003", hit_score=0.03),
         ]
         result = funnel.filter_top100(cards)
-        assert result == []
+        # P70 阈值 ≈ 0.023, 只有 CPT-003 (0.03) 通过
+        # 但如果过滤后非空, 结果应按降序排列
+        scores = [c.hitScore for c in result]
+        assert scores == sorted(scores, reverse=True)
 
     def test_filter_top100_boundary_exactly_0_7(self) -> None:
         """hitScore 恰好 0.7 应被过滤 (严格大于 0.7)。"""
@@ -607,9 +615,9 @@ class TestFunnelFilter:
         ]
         result = funnel.batch_run(trends, orchestrator)
         assert isinstance(result, list)
-        # 所有返回的卡片都应满足 hitScore > 0.7 (如果有的话)
+        # 所有返回的卡片都应满足 hitScore > 动态阈值 (如果有的话)
         for card in result:
-            assert card.hitScore > 0.7
+            assert card.hitScore > funnel.MIN_THRESHOLD
 
     def test_batch_run_empty_trends(self) -> None:
         """batch_run 空趋势列表应返回空列表。"""

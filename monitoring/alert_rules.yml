@@ -1,0 +1,92 @@
+# ==============================================================================
+# Prometheus 告警规则 — MINISO AI Engine
+# ==============================================================================
+# 告警级别:
+#   - critical: 服务宕机、响应时间过长
+#   - warning:  资源使用率高、错误率上升
+#
+# 通知渠道: 通过 Grafana Alerting 转发至飞书/钉钉 Webhook
+# ==============================================================================
+
+groups:
+  # ==================================================================
+  # 服务可用性告警
+  # ==================================================================
+  - name: service-availability
+    rules:
+      # 服务宕机 (持续 1 分钟无法抓取)
+      - alert: ServiceDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} 服务不可用"
+          description: "{{ $labels.service }} ({{ $labels.layer }}) 已离线超过 1 分钟"
+
+      # 服务恢复
+      - alert: ServiceRecovered
+        expr: up == 1
+        for: 30s
+        labels:
+          severity: info
+        annotations:
+          summary: "{{ $labels.service }} 服务已恢复"
+          description: "{{ $labels.service }} 已重新上线"
+
+  # ==================================================================
+  # 性能告警
+  # ==================================================================
+  - name: performance
+    rules:
+      # 响应时间过长 (> 5s)
+      - alert: HighLatency
+        expr: |
+          histogram_quantile(
+            0.95,
+            rate(http_request_duration_seconds_bucket[5m])
+          ) > 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} P95 响应时间过高"
+          description: "P95 响应时间: {{ $value }}s (阈值: 5s)"
+
+      # 错误率过高 (> 5%)
+      - alert: HighErrorRate
+        expr: |
+          rate(http_requests_total{status=~"5.."}[5m])
+          / rate(http_requests_total[5m]) > 0.05
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} 5xx 错误率过高"
+          description: "5xx 错误率: {{ $value | humanizePercentage }} (阈值: 5%)"
+
+  # ==================================================================
+  # 资源告警
+  # ==================================================================
+  - name: resources
+    rules:
+      # CPU 使用率过高 (> 80%)
+      - alert: HighCPU
+        expr: |
+          rate(process_cpu_seconds_total[5m]) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} CPU 使用率过高"
+          description: "CPU 使用率: {{ $value | humanizePercentage }}"
+
+      # 内存使用过高 (> 1GB)
+      - alert: HighMemory
+        expr: process_resident_memory_bytes > 1073741824
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} 内存使用过高"
+          description: "内存使用: {{ $value | humanize1024 }} (阈值: 1GiB)"

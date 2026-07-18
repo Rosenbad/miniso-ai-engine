@@ -5,6 +5,7 @@
 #   - models       : Pydantic 数据模型 (TrendSignal / IPMatch / ProductIdeaCard 等)
 #   - database     : SQLAlchemy 异步数据库连接
 #   - redis_client : 异步 Redis 客户端
+#   - cors         : CORS 跨域配置 (从环境变量读取白名单)
 # ==============================================================================
 
 """共享模块包。
@@ -13,6 +14,7 @@
     - 数据模型 (shared.models)
     - 数据库连接 (shared.database)
     - Redis 客户端 (shared.redis_client)
+    - CORS 配置 (shared.cors)
 """
 
 __version__ = "0.2.0"

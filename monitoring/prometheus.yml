@@ -1,0 +1,54 @@
+# ==============================================================================
+# Prometheus 配置 — MINISO AI Engine 监控
+# ==============================================================================
+# 抓取目标:
+#   - TrendPulse  (:8001)
+#   - IdeaForge   (:8002)
+#   - MarketProbe (:8003)
+#
+# 抓取间隔: 15s (默认), 告警评估间隔: 30s
+# ==============================================================================
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 30s
+  external_labels:
+    project: miniso-ai-engine
+
+# 告警规则
+rule_files:
+  - alert_rules.yml
+
+# 抓取目标
+scrape_configs:
+  # TrendPulse 数据感知层
+  - job_name: trendpulse
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["trendpulse:8001"]
+        labels:
+          service: trendpulse
+          layer: data-perception
+
+  # IdeaForge 决策推理层
+  - job_name: ideaforge
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["ideaforge:8002"]
+        labels:
+          service: ideaforge
+          layer: decision-inference
+
+  # MarketProbe 验证反馈层
+  - job_name: marketprobe
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["marketprobe:8003"]
+        labels:
+          service: marketprobe
+          layer: validation-feedback
+
+  # Prometheus 自监控
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

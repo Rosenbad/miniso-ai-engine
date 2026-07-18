@@ -1,0 +1,62 @@
+# ==============================================================================
+# MINISO AI Engine - 监控告警基础设施 (Phase 3)
+# ==============================================================================
+# Prometheus + Grafana 监控栈
+#
+# 启动方式:
+#   docker compose -f docker-compose.monitoring.yml up -d
+#
+# 访问地址:
+#   Prometheus:  http://localhost:9090
+#   Grafana:     http://localhost:3001 (admin/admin)
+#
+# 监控目标:
+#   - TrendPulse  :8001/metrics
+#   - IdeaForge   :8002/metrics
+#   - MarketProbe :8003/metrics
+# ==============================================================================
+
+version: "3.8"
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: miniso-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - miniso-prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.enable-lifecycle"
+    networks:
+      - miniso-net
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: miniso-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - miniso-grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - miniso-net
+
+volumes:
+  miniso-prometheus-data:
+  miniso-grafana-data:
+
+networks:
+  miniso-net:
+    external: true
+    name: miniso-ai-engine_miniso-net
