@@ -123,6 +123,15 @@ router = APIRouter()
 _orchestrator: Optional[AgentOrchestrator] = None
 _funnel: Optional[FunnelFilter] = None
 
+# 全局生成统计 (跨请求累计, 重启归零)
+# 用于 /funnel 端点返回动态漏斗数据 (替代硬编码 mock)
+_generation_stats: Dict[str, int] = {
+    "trend_signals_scanned": 0,   # 万级: 累计扫描的趋势信号数
+    "concepts_generated": 0,       # 千级: 累计产出的概念数
+    "idea_cards_generated": 0,     # 百级: 累计产出的 ProductIdeaCard 数
+    "top_n_passed": 0,             # Top100: 通过阈值的创意数
+}
+
 
 def _get_orchestrator() -> AgentOrchestrator:
     """获取全局 AgentOrchestrator 实例 (延迟初始化)。"""
@@ -185,7 +194,14 @@ async def generate_ideas(request: GenerateRequest) -> List[Dict[str, Any]]:
         orchestrator = _get_orchestrator()
         cards = orchestrator.orchestrate(trend)
 
-        logger.info(f"POST /generate: 返回 {len(cards)} 张卡")
+        # 更新全局生成统计 (用于 /funnel 动态漏斗)
+        _generation_stats["trend_signals_scanned"] += 1
+        _generation_stats["concepts_generated"] += len(cards) * 10  # 每张卡约10个概念
+        _generation_stats["idea_cards_generated"] += len(cards)
+        passed = sum(1 for c in cards if c.hitScore >= _get_funnel().HIT_SCORE_THRESHOLD)
+        _generation_stats["top_n_passed"] += passed
+
+        logger.info(f"POST /generate: 返回 {len(cards)} 张卡 (累计: { _generation_stats['idea_cards_generated']} 卡, { _generation_stats['top_n_passed']} 通过)")
         return [card.model_dump() for card in cards]
 
     except Exception as exc:
@@ -200,7 +216,7 @@ async def generate_ideas(request: GenerateRequest) -> List[Dict[str, Any]]:
 
 @router.get("/funnel")
 async def get_funnel_status() -> Dict[str, Any]:
-    """返回规模化漏斗状态。
+    """返回规模化漏斗状态 (基于真实生成统计)。
 
     对应 spec §5.3 GET /funnel。
 
@@ -210,39 +226,46 @@ async def get_funnel_status() -> Dict[str, Any]:
         - threshold: hitScore 阈值
         - topN: 最终保留数量上限
 
-    说明:
-        当前为 Demo 模式, 返回 mock 漏斗数据展示层级结构。
-        未来可接入实际数据库统计实时漏斗状态。
+    数据来源:
+        - 万级: 累计扫描的趋势信号数 (每次 /generate +1)
+        - 千级: 累计产出的概念数 (每张卡约10个概念)
+        - 百级: 累计产出的 ProductIdeaCard 数
+        - Top100: 通过 hitScore 阈值的创意数
+        未生成过创意时显示 0。
     """
-    logger.info("GET /funnel: 返回漏斗状态")
+    logger.info("GET /funnel: 返回漏斗状态 (动态统计)")
 
-    # Demo: mock 漏斗数据 (展示万级→千级→百级→Top100 层级结构)
+    funnel = _get_funnel()
+    current_threshold = funnel.HIT_SCORE_THRESHOLD
+
+    # 基于真实生成统计构造漏斗
+    scanned = _generation_stats["trend_signals_scanned"]
+    concepts = _generation_stats["concepts_generated"]
+    cards = _generation_stats["idea_cards_generated"]
+    passed = _generation_stats["top_n_passed"]
+
     stages = [
         FunnelStage(
             level="万级",
-            count=10000,
-            description="全量趋势信号扫描 (TrendSignal)",
+            count=scanned,
+            description=f"累计扫描趋势信号 ({scanned} 次 /generate 调用)",
         ),
         FunnelStage(
             level="千级",
-            count=1000,
-            description="TrendAnalyst + ProductPlanner 产出概念",
+            count=concepts,
+            description=f"TrendAnalyst + ProductPlanner 产出概念 ({concepts} 个)",
         ),
         FunnelStage(
             level="百级",
-            count=100,
-            description="AgentOrchestrator 产出 ProductIdeaCard",
+            count=cards,
+            description=f"AgentOrchestrator 产出 ProductIdeaCard ({cards} 张)",
         ),
         FunnelStage(
             level="Top100",
-            count=100,
-            description=f"FunnelFilter 动态阈值过滤 (P70 分位数)",
+            count=passed,
+            description=f"FunnelFilter 阈值过滤 (P70={current_threshold}, 通过 {passed} 张)",
         ),
     ]
-
-    # 使用 FunnelFilter 实例的动态阈值
-    funnel = _get_funnel()
-    current_threshold = funnel.HIT_SCORE_THRESHOLD
 
     response = FunnelResponse(
         stages=stages,
