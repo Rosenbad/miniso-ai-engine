@@ -213,15 +213,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     try {
       const testPlan = await createTestPlan(product);
       set({ testPlan });
-      const simulation = await simulateSales(
-        testPlan as unknown as Record<string, unknown>,
-        { days: 7 },
-      );
+      const simulation = await simulateSales(testPlan, { days: 7 });
       set({ simulation });
-      const analysis = await analyzeResults(
-        testPlan as unknown as Record<string, unknown>,
-        simulation as unknown as Record<string, unknown>,
-      );
+      const analysis = await analyzeResults(testPlan, simulation);
       set({ analysis, validating: false });
     } catch (e) {
       set({
@@ -250,7 +244,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         }
       }
       const calibration = await calibrateModel(
-        (testPlan ?? null) as unknown as Record<string, unknown> | null,
+        testPlan ?? null,
         predictedHits,
         actualResults,
       );

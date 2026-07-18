@@ -198,17 +198,20 @@ export async function createTestPlan(
 /**
  * 运行 7-14 天销售模拟。
  * POST /simulate
+ *
+ * @param testPlan 测试计划 (由 createTestPlan 生成)
+ * @param options  模拟参数 { days: 模拟天数, seed?: 随机种子 }
  */
 export async function simulateSales(
-  testPlan?: Record<string, unknown> | null,
-  options?: { days?: number; seed?: number },
+  testPlan: TestPlan,
+  options: { days: number; seed?: number },
 ): Promise<SimulationData> {
   return request<SimulationData>(
     `${MARKETPROBE_URL}/simulate`,
     jsonBody({
-      test_plan: testPlan ?? null,
-      days: options?.days ?? null,
-      seed: options?.seed ?? 42,
+      test_plan: testPlan,
+      days: options.days,
+      seed: options.seed ?? 42,
     }),
   );
 }
@@ -216,16 +219,19 @@ export async function simulateSales(
 /**
  * 分析模拟结果，判定赢家。
  * POST /analyze
+ *
+ * @param testPlan       测试计划 (与 simulate 入参一致)
+ * @param simulationData 模拟数据 (simulate 的返回值)
  */
 export async function analyzeResults(
-  testPlan?: Record<string, unknown> | null,
-  simulationData?: Record<string, unknown> | null,
+  testPlan: TestPlan,
+  simulationData: SimulationData,
 ): Promise<AnalysisResult> {
   return request<AnalysisResult>(
     `${MARKETPROBE_URL}/analyze`,
     jsonBody({
-      test_plan: testPlan ?? null,
-      simulation_data: simulationData ?? null,
+      test_plan: testPlan,
+      simulation_data: simulationData,
     }),
   );
 }
@@ -233,16 +239,20 @@ export async function analyzeResults(
 /**
  * 根据验证结果校准模型 (反哺链路修复)。
  * POST /calibrate
+ *
+ * @param testPlan      测试计划 (可为 null, 表示无对应测试计划)
+ * @param predictedHits 模型预测的爆品概率 { combination_id: probability }
+ * @param actualResults 实际模拟验证的综合评分 { combination_id: score }
  */
 export async function calibrateModel(
-  testResult?: Record<string, unknown> | null,
+  testPlan: TestPlan | null,
   predictedHits?: Record<string, number>,
   actualResults?: Record<string, number>,
 ): Promise<CalibrationResult> {
   return request<CalibrationResult>(
     `${MARKETPROBE_URL}/calibrate`,
     jsonBody({
-      test_result: testResult ?? null,
+      test_result: testPlan,
       predicted_hits: predictedHits ?? {},
       actual_results: actualResults ?? {},
     }),

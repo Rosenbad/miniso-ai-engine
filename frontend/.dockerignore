@@ -1,9 +1,8 @@
 node_modules
 .next
-out
-npm-debug.log*
 .git
-.gitignore
-README.md
+*.md
+.env*.local
+npm-debug.log*
 Dockerfile
-.dockerignore
+docker-compose*.yml

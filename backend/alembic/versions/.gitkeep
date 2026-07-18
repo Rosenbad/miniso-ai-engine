@@ -1,0 +1,2 @@
+# 此文件用于在 Git 中保留空的 versions/ 目录。
+# Alembic 迁移脚本 (如 001_initial_schema.py) 会放在此目录下。

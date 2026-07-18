@@ -46,6 +46,7 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from shared.exceptions import InternalError
 from trendpulse.collectors.utils import setup_logger
 
 logger = setup_logger(__name__)
@@ -199,8 +200,8 @@ async def create_test_plan(
 
         return plan
     except Exception as exc:
-        logger.error(f"POST /test-plan 失败: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
+        logger.error(f"POST /test-plan 失败: {exc}", exc_info=True)
+        raise InternalError(detail="处理请求时发生内部错误") from exc
 
 
 # ==============================================================================
@@ -254,8 +255,8 @@ async def run_simulation(
 
         return result
     except Exception as exc:
-        logger.error(f"POST /simulate 失败: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
+        logger.error(f"POST /simulate 失败: {exc}", exc_info=True)
+        raise InternalError(detail="处理请求时发生内部错误") from exc
 
 
 # ==============================================================================
@@ -328,8 +329,8 @@ async def analyze_results(
 
         return result
     except Exception as exc:
-        logger.error(f"POST /analyze 失败: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
+        logger.error(f"POST /analyze 失败: {exc}", exc_info=True)
+        raise InternalError(detail="处理请求时发生内部错误") from exc
 
 
 # ==============================================================================
@@ -396,8 +397,8 @@ async def calibrate_model(
         result = calibrator.calibrate(test_result, predicted_hits, actual_results)
         return result
     except Exception as exc:
-        logger.error(f"POST /calibrate 失败: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
+        logger.error(f"POST /calibrate 失败: {exc}", exc_info=True)
+        raise InternalError(detail="处理请求时发生内部错误") from exc
 
 
 # ==============================================================================

@@ -32,9 +32,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
+from shared.exceptions import InternalError
 from shared.models import TrendSignal
 from ideaforge.funnel import FunnelFilter, TOP_N
 from ideaforge.orchestrator import AgentOrchestrator
@@ -188,8 +189,8 @@ async def generate_ideas(request: GenerateRequest) -> List[Dict[str, Any]]:
         return [card.model_dump() for card in cards]
 
     except Exception as exc:
-        logger.error(f"POST /generate 失败: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
+        logger.error(f"POST /generate 失败: {exc}", exc_info=True)
+        raise InternalError(detail="处理请求时发生内部错误") from exc
 
 
 # ==============================================================================

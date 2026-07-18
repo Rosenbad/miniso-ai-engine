@@ -42,5 +42,5 @@ COPY . .
 # 暴露端口
 EXPOSE 8000
 
-# 默认启动命令（各服务可通过 docker-compose 覆盖）
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# 默认启动命令 (docker-compose 会通过 command 覆盖)
+CMD ["gunicorn", "-c", "gunicorn.conf.py", "main:app"]
