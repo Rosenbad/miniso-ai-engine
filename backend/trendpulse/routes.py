@@ -389,37 +389,43 @@ async def cross_region_compare(
 async def collect(
     store: TrendStore = Depends(get_store),
 ) -> Dict[str, Any]:
-    """触发数据采集 (demo 模式: 重载种子数据并返回采集摘要)。
+    """触发数据采集 (调用 6 个真实采集器, 失败自动降级为模拟数据)。
 
-    生产环境可替换为调用各 collectors (xiaohongshu/douyin/tiktok/...),
-    此处保持接口契约一致, demo 模式同步返回完成摘要。
+    采集流程:
+        1. 并发调用 6 个采集器 (小红书/抖音/TikTok/Instagram/电商/搜索指数)
+        2. 每个采集器有 5s 超时保护, 失败走模拟降级
+        3. 采集结果聚合为 TrendSignal, 更新 TrendStore
+        4. 返回每个数据源的采集状态 (ok/degraded/failed)
+
+    降级策略:
+        - 真实采集: 调用真实平台 API (需配置凭证)
+        - 模拟降级: 生成带随机扰动的合理数据 (每次不同)
+        - 种子兜底: 全部失败时保留现有数据不覆盖
     """
-    logger.info("POST /collect: 触发数据采集 (demo 模式重载种子数据)")
+    from trendpulse.collector_orchestrator import CollectorOrchestrator
 
-    # demo 模式: 重载种子数据 (模拟一次完整采集)
-    total = store.seed_demo_data()
+    logger.info("POST /collect: 触发数据采集 (6 源并发 + 优雅降级)")
 
-    # 构造采集摘要: 每个数据源的采集状态与计数
-    all_signals = store.get_all_signals()
-    source_counts: Dict[str, int] = {}
-    for s in all_signals:
-        for src in s.sourceBreakdown:
-            source_counts[src] = source_counts.get(src, 0) + 1
+    orchestrator = CollectorOrchestrator()
+    result = await orchestrator.collect_all()
 
-    sources: List[Dict[str, Any]] = []
-    for name in _DATA_SOURCES:
-        sources.append(
-            {
-                "name": name,
-                "status": "ok",
-                "count": source_counts.get(name, 0),
-            }
-        )
+    # 用采集到的信号更新 TrendStore
+    signals = result.get("signals", [])
+    if signals:
+        store.clear()
+        store.add_signals(signals)
+        total = len(store.get_all_signals())
+        logger.info(f"POST /collect: TrendStore 已更新, 共 {total} 条信号")
+    else:
+        # 全部失败, 保留现有数据
+        total = len(store.get_all_signals())
+        logger.warning("POST /collect: 采集结果为空, 保留现有 TrendStore 数据")
 
     return {
         "status": "completed",
-        "sources": sources,
+        "sources": result["sources"],
         "total_signals": total,
+        "summary": result["summary"],
     }
 
 

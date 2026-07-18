@@ -51,6 +51,10 @@ export default function TrendRadar() {
   const loading = useAppStore((s) => s.loadingTrends);
   const error = useAppStore((s) => s.errorTrends);
   const fetchTrends = useAppStore((s) => s.fetchTrends);
+  const collectTrends = useAppStore((s) => s.collectTrends);
+  const collecting = useAppStore((s) => s.collecting);
+  const collectResult = useAppStore((s) => s.collectResult);
+  const errorCollect = useAppStore((s) => s.errorCollect);
   const selectedTopic = useAppStore((s) => s.selectedTopic);
   const selectTopic = useAppStore((s) => s.selectTopic);
   const trendDetail = useAppStore((s) => s.trendDetail);
@@ -85,13 +89,63 @@ export default function TrendRadar() {
         </span>
         <button
           type="button"
-          onClick={() => void fetchTrends()}
-          disabled={loading}
-          className="px-2 py-1 rounded bg-blue-50 text-blue-600 hover:bg-blue-100 transition-colors disabled:opacity-50"
+          onClick={() => void collectTrends()}
+          disabled={collecting}
+          className="px-2 py-1 rounded bg-blue-50 text-blue-600 hover:bg-blue-100 transition-colors disabled:opacity-50 flex items-center gap-1"
         >
-          {loading ? "采集中…" : "刷新采集"}
+          {collecting ? (
+            <>
+              <span className="w-3 h-3 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
+              采集中…
+            </>
+          ) : (
+            "刷新采集"
+          )}
         </button>
       </div>
+
+      {/* 采集状态反馈面板 */}
+      {collectResult && (
+        <div className="mt-2 rounded-lg border border-gray-200 bg-gray-50/50 p-2 space-y-1.5">
+          <div className="flex items-center justify-between text-[10px]">
+            <span className="font-medium text-gray-700">采集结果</span>
+            <span className="font-mono text-gray-400">
+              {collectResult.summary?.ok_count ?? 0} 成功 ·{" "}
+              {collectResult.summary?.degraded_count ?? 0} 降级 ·{" "}
+              {collectResult.summary?.failed_count ?? 0} 失败
+            </span>
+          </div>
+          <div className="grid grid-cols-3 gap-1">
+            {collectResult.sources.map((src) => (
+              <div
+                key={src.name}
+                className={`px-1.5 py-1 rounded text-[9px] border ${
+                  src.status === "ok"
+                    ? "border-green-200 bg-green-50 text-green-700"
+                    : src.status === "degraded"
+                      ? "border-amber-200 bg-amber-50 text-amber-700"
+                      : "border-red-200 bg-red-50 text-red-600"
+                }`}
+                title={src.error || src.mode}
+              >
+                <div className="font-mono truncate">{src.name}</div>
+                <div className="flex items-center justify-between mt-0.5">
+                  <span>{src.count}条</span>
+                  <span className="text-[8px] uppercase opacity-70">
+                    {src.mode === "real" ? "真实" : src.mode === "simulated" ? "模拟" : "错误"}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {errorCollect && (
+        <div className="mt-2 rounded-lg border border-red-200 bg-red-50 p-2 text-[11px] text-red-600">
+          采集失败: {errorCollect}
+        </div>
+      )}
 
       {/* 趋势列表 (可滚动) */}
       <div className="mt-2 space-y-2 overflow-y-auto flex-1 min-h-0 pr-1">

@@ -206,10 +206,27 @@ export interface CrossRegionComparison {
 }
 
 /** POST /collect 采集摘要响应 */
+export interface CollectSourceResult {
+  name: string;
+  status: "ok" | "degraded" | "failed";
+  count: number;
+  mode: "real" | "simulated" | "error";
+  error?: string;
+}
+
+export interface CollectSummary {
+  total_sources: number;
+  ok_count: number;
+  degraded_count: number;
+  failed_count: number;
+  total_signals: number;
+}
+
 export interface CollectResult {
   status: string;
-  sources: Array<{ name: string; status: string; count: number }>;
+  sources: CollectSourceResult[];
   total_signals: number;
+  summary?: CollectSummary;
 }
 
 // ------------------------------------------------------------------------------

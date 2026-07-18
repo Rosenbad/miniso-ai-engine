@@ -12,6 +12,7 @@ import { create } from "zustand";
 import {
   analyzeResults,
   calibrateModel,
+  collectTrends as collectTrendsApi,
   createTestPlan,
   generateIdeas,
   getCrossRegionCompare,
@@ -23,6 +24,7 @@ import {
 import type {
   AnalysisResult,
   CalibrationResult,
+  CollectResult,
   CrossRegionComparison,
   FunnelStatus,
   ProductIdeaCard,
@@ -44,6 +46,7 @@ interface AppState {
   selectedTopic: string | null;
   trendDetail: TrendDetail | null;
   crossRegion: CrossRegionComparison | null;
+  collectResult: CollectResult | null;
 
   // ---- 创意数据 (IdeaForge) ----
   ideas: ProductIdeaCard[];
@@ -61,6 +64,7 @@ interface AppState {
   // ---- 加载态 ----
   loadingTrends: boolean;
   loadingDetail: boolean;
+  collecting: boolean;
   generating: boolean;
   loadingFunnel: boolean;
   validating: boolean;
@@ -69,6 +73,7 @@ interface AppState {
   // ---- 错误态 ----
   errorTrends: string | null;
   errorDetail: string | null;
+  errorCollect: string | null;
   errorGenerate: string | null;
   errorFunnel: string | null;
   errorValidation: string | null;
@@ -76,6 +81,7 @@ interface AppState {
 
   // ---- Actions ----
   fetchTrends: () => Promise<void>;
+  collectTrends: () => Promise<void>;
   selectTopic: (topic: string | null) => void;
   fetchTrendDetail: (topic: string) => Promise<void>;
   fetchCrossRegion: (topic: string) => Promise<void>;
@@ -97,6 +103,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   selectedTopic: null,
   trendDetail: null,
   crossRegion: null,
+  collectResult: null,
 
   ideas: [],
   selectedIdea: null,
@@ -110,6 +117,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   loadingTrends: false,
   loadingDetail: false,
+  collecting: false,
   generating: false,
   loadingFunnel: false,
   validating: false,
@@ -117,6 +125,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   errorTrends: null,
   errorDetail: null,
+  errorCollect: null,
   errorGenerate: null,
   errorFunnel: null,
   errorValidation: null,
@@ -132,6 +141,23 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({
         loadingTrends: false,
         errorTrends: e instanceof Error ? e.message : String(e),
+      });
+    }
+  },
+
+  // ---- 触发数据采集 (POST /collect) ----
+  collectTrends: async () => {
+    set({ collecting: true, errorCollect: null });
+    try {
+      const result = await collectTrendsApi();
+      set({ collectResult: result, collecting: false });
+      // 采集完成后自动刷新趋势列表
+      const trends = await getTrends();
+      set({ trends });
+    } catch (e) {
+      set({
+        collecting: false,
+        errorCollect: e instanceof Error ? e.message : String(e),
       });
     }
   },
