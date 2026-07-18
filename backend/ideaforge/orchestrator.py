@@ -180,8 +180,13 @@ class AgentOrchestrator:
         )
 
         # Step 2: Agent 2 - ProductPlanner: ProductDirection → ProductConcept[]
-        concepts = self.product_planner.generate(direction)
-        logger.info(f"  Step 2 (ProductPlanner): 生成 {len(concepts)} 个概念")
+        # 传递真实趋势话题和关键词, 让产品名包含趋势内容
+        concepts = self.product_planner.generate(
+            direction,
+            trend_topic=trend.topic,
+            trend_keywords=trend.relatedKeywords,
+        )
+        logger.info(f"  Step 2 (ProductPlanner): 生成 {len(concepts)} 个概念 (trend_topic='{trend.topic}')")
 
         # Step 3-4: 对每个概念执行 IP 匹配 + 并行 A3∥A4
         cards: List[ProductIdeaCard] = []
@@ -419,8 +424,14 @@ class AgentOrchestrator:
         region_count = len(trend.crossRegionDiff)
         cross_region_diffusion_speed = min(1.0, region_count * 0.25)
 
-        # 设计新颖度 (基于设计描述长度, 归一化)
+        # 设计新颖度 (基于设计描述长度 + 变体差异化, 归一化)
+        # 不同变体 (基础款/进阶款/限定款) 有不同的新颖度基线
         design_novelty = min(1.0, len(concept.designDesc) / 100.0)
+        # 产品名含"限定款" → 新颖度 +0.15, "进阶款" → +0.08, "基础款" → +0.0
+        if "限定款" in concept.productName:
+            design_novelty = min(1.0, design_novelty + 0.15)
+        elif "进阶款" in concept.productName:
+            design_novelty = min(1.0, design_novelty + 0.08)
 
         # 材质成本比 (基于材质字符串启发式, 简单默认)
         material_cost_ratio = 0.3

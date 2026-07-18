@@ -466,49 +466,84 @@ class ProductPlanner:
     # generate() - 主入口: ProductDirection → List[ProductConcept]
     # ==================================================================
 
-    def generate(self, direction: ProductDirection) -> List[ProductConcept]:
-        """基于产品方向生成产品概念列表。
+    def generate(
+        self,
+        direction: ProductDirection,
+        trend_topic: str = "",
+        trend_keywords: List[str] | None = None,
+    ) -> List[ProductConcept]:
+        """基于产品方向 + 真实趋势话题生成产品概念列表。
 
-        对应 spec §4.2 Agent 2 核心职责。将 ProductDirection 转化为
-        ≥3 个 ProductConcept, 每个概念含 8 个字段。
+        对应 spec §4.2 Agent 2 核心职责。将 ProductDirection + 真实趋势
+        转化为 ≥3 个 ProductConcept, 每个概念含 8 个字段。
+
+        真实数据融合:
+            1. 产品名包含趋势话题关键词 (如"寻找卢本伟主题盲盒")
+            2. 品类自动推断: 未知品类基于趋势关键词映射到最近品类
+            3. 设计描述融入趋势话题
+            4. IP 方向基于品类匹配
 
         参数:
-            direction: 产品方向 (ProductDirection 实例, Agent 1 输出)
+            direction       : 产品方向 (ProductDirection 实例, Agent 1 输出)
+            trend_topic     : 真实趋势话题 (来自采集器, 如"寻找卢本伟")
+            trend_keywords  : 趋势关联关键词列表
 
         返回:
-            ProductConcept 列表 (≥3 个), 每个概念:
-            - productName     : 模板产品名
-            - category        : 透传 direction.category
-            - designDesc      : 融合 styleTone 的设计描述
-            - material        : 模板材质
-            - priceRange      : 模板价格区间
-            - ipDirection     : 品类对应 IP 联名建议
-            - sellingPoints   : 融合 styleTone 的卖点列表
-            - targetAudience  : 透传 direction.targetAudience
+            ProductConcept 列表 (≥3 个), 产品名包含趋势话题
         """
+        from shared.models import TrendSignal
+
         logger.info(
             f"ProductPlanner.generate: category='{direction.category}', "
-            f"styleTone='{direction.styleTone}', priceRange='{direction.priceRange}'"
+            f"styleTone='{direction.styleTone}', trend_topic='{trend_topic}'"
         )
 
-        # 1. 查找品类模板 (未知品类用 fallback)
-        template = _CATEGORY_TEMPLATES.get(direction.category, _FALLBACK_TEMPLATE)
+        # 1. 品类自动推断 (未知品类基于趋势关键词映射)
+        effective_category = self._infer_category(
+            direction.category, trend_topic, trend_keywords or []
+        )
 
-        # 2. 查找 IP 方向建议 (未知品类用默认)
-        ip_direction = _CATEGORY_IP.get(direction.category, _DEFAULT_IP_DIRECTION)
+        # 2. 查找品类模板 (未知品类用 fallback)
+        template = _CATEGORY_TEMPLATES.get(effective_category, _FALLBACK_TEMPLATE)
 
-        # 3. 遍历模板变体, 生成 ProductConcept
+        # 3. 查找 IP 方向建议
+        ip_direction = _CATEGORY_IP.get(effective_category, _DEFAULT_IP_DIRECTION)
+
+        # 4. 生成 3 个差异化变体 (基础款/进阶款/限定款)
+        #    产品名 = [趋势话题] + [变体定位] + [品类产品名]
+        tier_suffixes = ["基础款", "进阶款", "限定款"]
         concepts: List[ProductConcept] = []
         style = direction.styleTone
-        for variant in template:
+
+        # 从模板中选取前 3 个变体 (或 fallback 的 3 个)
+        variants = template[:3]
+
+        for idx, variant in enumerate(variants):
+            # 产品名融合趋势话题
+            base_name = variant["name"]
+            tier = tier_suffixes[idx] if idx < len(tier_suffixes) else f"变体{idx+1}"
+
+            if trend_topic:
+                # 真实趋势话题作为产品名前缀
+                product_name = f"{trend_topic}{tier}"
+            else:
+                product_name = f"{base_name}"
+
+            # 设计描述融合趋势话题 + 风格调性
             design_desc = self._format_text(variant["design_desc"], style)
+            if trend_topic:
+                design_desc = f"围绕「{trend_topic}」趋势, {design_desc}"
+
+            # 卖点融合
             selling_points = [
                 self._format_text(sp, style) for sp in variant["selling_points"]
             ]
+            if trend_topic and idx == 0:
+                selling_points.insert(0, f"紧贴「{trend_topic}」热门趋势")
 
             concept = ProductConcept(
-                productName=variant["name"],
-                category=direction.category,
+                productName=product_name,
+                category=effective_category,
                 designDesc=design_desc,
                 material=variant["material"],
                 priceRange=variant["price_range"],
@@ -520,10 +555,65 @@ class ProductPlanner:
 
         logger.info(
             f"ProductPlanner.generate: 完成 → 生成 {len(concepts)} 个概念, "
-            f"category='{direction.category}', ipDirection='{ip_direction}'"
+            f"category='{effective_category}', ipDirection='{ip_direction}', "
+            f"productName[0]='{concepts[0].productName}'"
         )
 
         return concepts
+
+    # ==================================================================
+    # 品类自动推断 (基于趋势关键词)
+    # ==================================================================
+
+    def _infer_category(
+        self,
+        original_category: str,
+        trend_topic: str,
+        keywords: List[str],
+    ) -> str:
+        """基于趋势话题和关键词推断最合适的品类。
+
+        当原始品类不在已知模板中时, 基于趋势关键词映射到最近的品类。
+
+        参数:
+            original_category : 原始品类 (来自 TrendAnalyst)
+            trend_topic       : 趋势话题
+            keywords          : 趋势关联关键词
+
+        返回:
+            推断的品类 (确保在 _CATEGORY_TEMPLATES 中)
+        """
+        # 已知品类直接返回
+        if original_category in _CATEGORY_TEMPLATES:
+            return original_category
+
+        # 合并话题和关键词用于推断
+        combined_text = f"{trend_topic} {' '.join(keywords)}".lower()
+
+        # 关键词 → 品类映射规则
+        category_rules = [
+            (["美妆", "化妆", "唇", "护肤", "香水", "口红", "个护"], "美妆/个护"),
+            (["家居", "装饰", "花瓶", "摆件", " candle", "香薰"], "家居/装饰"),
+            (["服饰", "穿搭", "服装", "包", "袜", "鞋"], "服饰/穿搭"),
+            (["数码", "配件", "手机", "耳机", "支架", "电子"], "数码/配件"),
+            (["玩具", "文创", "盲盒", "钥匙扣", "文具"], "玩具/文创"),
+            (["食品", "零食", "糖", "饼干", "礼盒"], "食品/零食"),
+            (["香氛", "蜡烛", "香薰"], "家居/香氛"),
+        ]
+
+        for rule_keywords, mapped_category in category_rules:
+            if any(kw.lower() in combined_text for kw in rule_keywords):
+                logger.info(
+                    f"ProductPlanner._infer_category: '{original_category}' → '{mapped_category}' "
+                    f"(matched keywords in '{trend_topic}')"
+                )
+                return mapped_category
+
+        # 默认映射: 视频/娱乐/社会/热点 → 玩具/文创 (最适合 IP 联名)
+        logger.info(
+            f"ProductPlanner._infer_category: '{original_category}' → '玩具/文创' (default)"
+        )
+        return "玩具/文创"
 
     # ==================================================================
     # 内部辅助: 文本格式化 (替换 {style} 占位符)
