@@ -5,7 +5,7 @@
 #
 # 触发条件: push/PR 到 main 或 develop 分支
 # 流水线阶段:
-#   1. backend-tests   - Python pytest (761 用例)
+#   1. backend-tests   - Python pytest (788 用例)
 #   2. frontend-build  - Next.js TypeScript + 构建
 #   3. docker-build    - Docker 镜像构建验证 (仅 main 分支)
 #
