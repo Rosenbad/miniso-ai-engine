@@ -86,7 +86,7 @@ export default function ValidationPanel() {
         splitLine: { lineStyle: { color: "#f3f4f6" } },
       },
       series: combos.map((combo, i) => {
-        const isWinner = analysis?.winner === combo;
+        const isWinner = analysis?.winner?.combination_id === combo;
         return {
           name: combo,
           type: "bar",
@@ -105,7 +105,7 @@ export default function ValidationPanel() {
 
   const hasSimulation = !!simulation && Object.keys(simulation.daily_data ?? {}).length > 0;
   const predictedScore = selectedIdea?.hitScore;
-  const actualScore = analysis?.rankings?.[0]?.score;
+  const actualScore = analysis?.winner?.composite_score;
 
   return (
     <div className="flex flex-col h-full min-h-0">
@@ -195,12 +195,12 @@ export default function ValidationPanel() {
                 <span className="text-base">🏆</span>
                 <div className="min-w-0">
                   <div className="text-sm font-medium text-gray-900 truncate">
-                    {analysis.winner}
+                    {analysis.winner?.combination_id ?? "-"}
                   </div>
                   <div className="text-[10px] text-gray-500">
                     综合评分{" "}
                     <span className="font-mono">
-                      {analysis.rankings?.[0]?.score?.toFixed(2) ?? "-"}
+                      {analysis.winner?.composite_score?.toFixed(2) ?? "-"}
                     </span>{" "}
                     · 置信度{" "}
                     <span className="font-mono">

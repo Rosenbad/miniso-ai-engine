@@ -258,9 +258,23 @@ export interface SimulationData {
   [key: string]: unknown;
 }
 
+/** POST /analyze 响应 - 赢家组合详情 */
+export interface WinnerCombo {
+  combination_id: string;
+  composite_score: number;
+  total_sales: number;
+  avg_conversion: number;
+  profit_margin: number;
+  price: string;
+  packaging: string;
+  channel: string;
+  region: string;
+  [key: string]: unknown;
+}
+
 /** POST /analyze 响应 (分析结果) */
 export interface AnalysisResult {
-  winner: string;
+  winner: WinnerCombo | null;
   rankings: Array<{
     combination_id: string;
     score: number;
