@@ -26,6 +26,21 @@ const COMBO_COLORS = [
   "#10b981",
 ];
 
+// ---- 防御性渲染辅助 ----
+// 安全地将任意值格式化为定点数字符串，防止 API 返回非数字值时崩溃
+function safeFixed(val: unknown, digits = 2): string {
+  if (typeof val === "number" && isFinite(val)) return val.toFixed(digits);
+  const n = Number(val);
+  return isFinite(n) ? n.toFixed(digits) : "-";
+}
+
+// 安全地提取字符串，防止对象被直接渲染为 React child
+function safeStr(val: unknown, fallback = "-"): string {
+  if (typeof val === "string") return val;
+  if (typeof val === "number" && isFinite(val)) return String(val);
+  return fallback;
+}
+
 export default function ValidationPanel() {
   const selectedIdea = useAppStore((s) => s.selectedIdea);
   const validating = useAppStore((s) => s.validating);
@@ -195,16 +210,16 @@ export default function ValidationPanel() {
                 <span className="text-base">🏆</span>
                 <div className="min-w-0">
                   <div className="text-sm font-medium text-gray-900 truncate">
-                    {analysis.winner?.combination_id ?? "-"}
+                    {safeStr(analysis.winner?.combination_id)}
                   </div>
                   <div className="text-[10px] text-gray-500">
                     综合评分{" "}
                     <span className="font-mono">
-                      {analysis.winner?.composite_score?.toFixed(2) ?? "-"}
+                      {safeFixed(analysis.winner?.composite_score)}
                     </span>{" "}
                     · 置信度{" "}
                     <span className="font-mono">
-                      {analysis.confidence?.toFixed(2) ?? "-"}
+                      {safeFixed(analysis.confidence)}
                     </span>
                   </div>
                 </div>
@@ -214,14 +229,14 @@ export default function ValidationPanel() {
                 <div className="mt-2 space-y-1">
                   {analysis.rankings.slice(0, 3).map((r, i) => (
                     <div
-                      key={r.combination_id}
+                      key={safeStr(r.combination_id, String(i))}
                       className="flex items-center justify-between text-[10px] bg-white/60 rounded px-1.5 py-0.5"
                     >
                       <span className="text-gray-600 truncate">
-                        {i + 1}. {r.combination_id}
+                        {i + 1}. {safeStr(r.combination_id)}
                       </span>
                       <span className="font-mono text-gray-700">
-                        {r.score.toFixed(2)}
+                        {safeFixed(r.score)}
                       </span>
                     </div>
                   ))}
@@ -241,19 +256,22 @@ export default function ValidationPanel() {
               <div className="rounded bg-blue-50 border border-blue-100 px-2 py-1.5">
                 <div className="text-blue-400">预测爆品概率</div>
                 <div className="font-mono font-bold text-blue-600">
-                  {(predictedScore * 100).toFixed(0)}%
+                  {safeFixed(predictedScore * 100, 0)}%
                 </div>
               </div>
               <div className="rounded bg-green-50 border border-green-100 px-2 py-1.5">
                 <div className="text-green-500">实际验证评分</div>
                 <div className="font-mono font-bold text-green-600">
-                  {actualScore != null
-                    ? (actualScore * 100).toFixed(0) + "%"
+                  {typeof actualScore === "number" && isFinite(actualScore)
+                    ? safeFixed(actualScore * 100, 0) + "%"
                     : "-"}
                 </div>
               </div>
             </div>
-            {predictedScore != null && actualScore != null && (
+            {typeof predictedScore === "number" &&
+              typeof actualScore === "number" &&
+              isFinite(predictedScore) &&
+              isFinite(actualScore) && (
               <div className="mt-1 text-[10px] text-gray-500">
                 误差:{" "}
                 <span
@@ -264,7 +282,7 @@ export default function ValidationPanel() {
                   }`}
                 >
                   {(actualScore - predictedScore >= 0 ? "+" : "")}
-                  {((actualScore - predictedScore) * 100).toFixed(1)}%
+                  {safeFixed((actualScore - predictedScore) * 100, 1)}%
                 </span>
               </div>
             )}
@@ -295,7 +313,7 @@ export default function ValidationPanel() {
                         />
                       </div>
                       <span className="text-[9px] font-mono text-gray-400 w-8 text-right">
-                        {val.toFixed(2)}
+                        {safeFixed(val)}
                       </span>
                     </div>
                   ))}
@@ -335,7 +353,7 @@ export default function ValidationPanel() {
                     <div>
                       预测误差:{" "}
                       <span className="font-mono text-amber-600">
-                        {Object.values(calibration.prediction_errors)[0]?.toFixed(3)}
+                        {safeFixed(Object.values(calibration.prediction_errors)[0], 3)}
                       </span>
                     </div>
                   )}

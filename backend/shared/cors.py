@@ -39,9 +39,15 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # 开发环境默认允许的前端来源
+# 包含常见开发端口 (3000-3005), 支持 Next.js 端口冲突时自动切换
 _DEFAULT_DEV_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://localhost:3002",
+    "http://localhost:3003",
+    "http://localhost:3004",
+    "http://localhost:3005",
 ]
 
 # 允许的 HTTP 方法
